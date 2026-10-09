@@ -1,4 +1,6 @@
 const KEY = 'website-check/state-v1.json';
+const CHANGE_REVIEW_KEY = siteId => `website-check/change-reviews/${siteId}.json`;
+const FINDING_REVIEW_KEY = siteId => `website-check/finding-reviews/${siteId}.json`;
 const MAX_PAGES_PER_RUN = 30;
 const MAX_DISCOVERED = 3000;
 const MAX_EVENTS = 1200;
@@ -86,6 +88,16 @@ const readState = async env => {
     for (const event of site.events || []) if (!event.id) { event.id = await eventId(site.id, event); corrected = true; }
   }
   if (corrected) await env.BUCKET.put(KEY, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });
+  // Reviews have their own objects so a long-running scan cannot overwrite a
+  // Codex decision saved while that scan was still working from an older state.
+  for (const site of state.sites || []) {
+    const [changes, findings] = await Promise.all([
+      env.BUCKET.get(CHANGE_REVIEW_KEY(site.id)),
+      env.BUCKET.get(FINDING_REVIEW_KEY(site.id))
+    ]);
+    if (changes) site.changeReviews = { ...site.changeReviews, ...JSON.parse(await changes.text()) };
+    if (findings) site.reviewedConflicts = JSON.parse(await findings.text());
+  }
   return state;
 };
 const writeState = async (env, state) => {
@@ -368,7 +380,10 @@ async function recordFindings(env, { siteId, findings }) {
     else existing.push(finding);
   }
   site.reviewedConflicts = existing.slice(-40);
-  if (accepted.length) await writeState(env, state);
+  if (accepted.length) {
+    await env.BUCKET.put(FINDING_REVIEW_KEY(siteId), JSON.stringify(site.reviewedConflicts), { httpMetadata: { contentType: 'application/json' } });
+    await writeState(env, state);
+  }
   return { siteId, saved: accepted.length, total: site.reviewedConflicts.length };
 }
 
@@ -561,6 +576,7 @@ async function recordChangeReviews(env, { siteId, reviews }) {
     if (!['meaningful', 'noise', 'uncertain'].includes(decision) || !title || explanation.length < 8) throw new Error('Elke beoordeling vereist een besluit, titel en concrete uitleg.');
     site.changeReviews[review.id] = { decision, title, explanation, reviewedAt: new Date().toISOString(), source: 'codex' };
   }
+  await env.BUCKET.put(CHANGE_REVIEW_KEY(siteId), JSON.stringify(site.changeReviews), { httpMetadata: { contentType: 'application/json' } });
   await writeState(env, state);
   return { siteId, saved: reviews.length, remaining: (site.events || []).filter(event => CHANGE_TYPES.has(event.type) && !site.changeReviews?.[event.id]).length };
 }

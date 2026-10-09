@@ -70,6 +70,10 @@ test('compares general claims and does not confuse product prices with shipping'
     const saved = await f.tool('website_check_scan_site', compat({ action: 'record_findings', findings }));
     assert.equal(saved.saved, 1);
     assert.equal((await f.request('/api/state')).sites[0].reviewedConflicts.length, 1);
+    const staleFindings = JSON.parse(f.objects.get('website-check/state-v1.json'));
+    staleFindings.sites[0].reviewedConflicts = [];
+    f.objects.set('website-check/state-v1.json', JSON.stringify(staleFindings));
+    assert.equal((await f.request('/api/state')).sites[0].reviewedConflicts.length, 1);
     await f.tool('website_check_record_findings', { siteId: site.id, findings });
     assert.equal((await f.request('/api/state')).sites[0].reviewedConflicts.length, 1);
     await assert.rejects(() => f.tool('website_check_record_findings', { siteId: site.id, findings: [{
@@ -258,6 +262,9 @@ test('keeps scan candidates out of the portal until Codex records a review', asy
     const saved = await f.tool('website_check_scan_site', command({ action: 'record_change_reviews', reviews }));
     assert.equal(saved.saved, reviews.length);
     assert.equal(saved.remaining, 0);
+    const staleScan = JSON.parse(f.objects.get('website-check/state-v1.json'));
+    staleScan.sites[0].changeReviews = {};
+    f.objects.set('website-check/state-v1.json', JSON.stringify(staleScan));
     const reviewed = await f.request('/api/state');
     assert.equal(Object.keys(reviewed.sites[0].changeReviews).length, reviews.length);
     assert.equal((await f.tool('website_check_review_changes', { siteId: 'bonoir-nl' })).pending, 0);

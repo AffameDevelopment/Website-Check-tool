@@ -180,7 +180,7 @@ test('ignores rotating Shopify request tokens but detects a real HTML change', a
     await f.request('/api/scan', { method: 'POST', body: '{}' });
     const secondState = await f.request('/api/state');
     assert.equal(secondState.sites[0].pages[url].snapshotKey, firstSnapshot);
-    assert.equal(secondState.sites[0].pages[url].htmlHashVersion, 2);
+    assert.equal(secondState.sites[0].pages[url].htmlHashVersion, 3);
     assert.ok(!secondState.sites[0].events.some(event => event.url === url && event.type === 'html'));
     const oldKey = 'website-check/snapshots/bonoir-nl/bbbbbbbbbbbbbbbbbbbb/old.json';
     const newKey = 'website-check/snapshots/bonoir-nl/bbbbbbbbbbbbbbbbbbbb/new.json';
@@ -198,5 +198,73 @@ test('ignores rotating Shopify request tokens but detects a real HTML change', a
     const realDiff = await f.request('/api/diff?before=' + encodeURIComponent(change.beforeSnapshot) + '&after=' + encodeURIComponent(change.afterSnapshot));
     assert.ok(realDiff.html.hunks.some(hunk => hunk.before.includes('class="old"') && hunk.after.includes('class="new"')));
     assert.ok(realDiff.html.hunks.every(hunk => hunk.before !== hunk.after));
+  } finally { f.restore(); }
+});
+
+test('compares Shopify app blocks by identity instead of pairing unrelated apps', async () => {
+  const f = fixture();
+  try {
+    const block = (app, content) => '<!-- BEGIN app block: shopify://apps/' + app + '/blocks/config/123 -->' + content + '<!-- END app block -->';
+    const klaviyo = block('klaviyo-email-marketing-sms', '<script src="https://static.klaviyo.com/klaviyo.js"></script>');
+    const bss = block('bss-b2b-solution', '<script id="bss-config">const plan="advanced"</script>');
+    const meta = token => '<meta name="shopify-y" content="' + token + '" data-expiration="123">';
+    const wrap = (blocks, token) => '<html><head>' + blocks + meta(token) + '</head><body><p>Welkom</p></body></html>';
+    const beforeKey = 'website-check/snapshots/bonoir-nl/cccccccccccccccccccc/old.json';
+    const afterKey = 'website-check/snapshots/bonoir-nl/cccccccccccccccccccc/new.json';
+    const readDiff = async (oldHtml, newHtml) => {
+      f.objects.set(beforeKey, JSON.stringify({ text: 'Welkom', html: oldHtml }));
+      f.objects.set(afterKey, JSON.stringify({ text: 'Welkom', html: newHtml }));
+      return f.request('/api/diff?before=' + encodeURIComponent(beforeKey) + '&after=' + encodeURIComponent(afterKey));
+    };
+    const reordered = await readDiff(wrap(klaviyo + bss, 'old'), wrap(bss + klaviyo, 'new'));
+    assert.equal(reordered.html.total, 0);
+    assert.equal(reordered.html.reorderedAppBlocks, true);
+    const replaced = await readDiff(wrap(klaviyo, 'old'), wrap(bss, 'new'));
+    assert.equal(replaced.html.total, 2);
+    assert.ok(replaced.html.hunks.some(hunk => hunk.kind.includes('klaviyo') && hunk.kind.includes('verwijderd') && hunk.after === '—'));
+    assert.ok(replaced.html.hunks.some(hunk => hunk.kind.includes('bss b2b') && hunk.kind.includes('toegevoegd') && hunk.before === '—'));
+    assert.ok(!replaced.html.hunks.some(hunk => hunk.before.includes('klaviyo') && hunk.after.includes('bss-b2b')));
+    const changed = await readDiff(wrap(klaviyo + bss, 'old'), wrap(klaviyo + block('bss-b2b-solution', '<script id="bss-config">const plan="basic"</script>'), 'new'));
+    assert.equal(changed.html.total, 1);
+    assert.match(changed.html.hunks[0].kind, /bss b2b solution gewijzigd/);
+    const url = 'https://bonoir.nl/';
+    f.pages[url] = wrap(klaviyo + bss, 'old');
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const first = await f.request('/api/state');
+    const snapshot = first.sites[0].pages[url].snapshotKey;
+    f.pages[url] = wrap(bss + klaviyo, 'new');
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const second = await f.request('/api/state');
+    assert.equal(second.sites[0].pages[url].snapshotKey, snapshot);
+    assert.ok(!second.sites[0].events.some(event => event.url === url && event.type === 'html'));
+  } finally { f.restore(); }
+});
+
+test('keeps scan candidates out of the portal until Codex records a review', async () => {
+  const f = fixture();
+  try {
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    f.pages['https://bonoir.nl/'] = '<html><body><p>Gratis verzending vanaf €45</p><p>Garantie op alle producten: 2 jaar</p><a href="/pages/info">Info</a></body></html>';
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const state = await f.request('/api/state');
+    const candidates = state.sites[0].events.filter(event => ['price', 'text', 'html', 'theme', 'meta', 'facts'].includes(event.type));
+    assert.ok(candidates.length >= 2);
+    assert.ok(candidates.every(event => event.id && !state.sites[0].changeReviews[event.id]));
+    const command = value => ({ siteId: '@website-check:' + JSON.stringify({ siteId: 'bonoir-nl', ...value }) });
+    const bundle = await f.tool('website_check_scan_site', command({ action: 'review_changes', limit: 20 }));
+    assert.equal(bundle.pending, candidates.length);
+    assert.ok(bundle.items.some(item => item.textChanges.some(change => change.before.includes('35') && change.after.includes('45'))));
+    const reviews = bundle.items.map((item, index) => ({ id: item.id, decision: index === 0 ? 'meaningful' : 'noise', title: index === 0 ? 'Verzenddrempel gewijzigd' : 'Dubbele technische melding', explanation: index === 0 ? 'De zichtbare verzenddrempel veranderde van €35 naar €45.' : 'Deze melding hoort bij dezelfde zichtbare tekstwijziging.' }));
+    const saved = await f.tool('website_check_scan_site', command({ action: 'record_change_reviews', reviews }));
+    assert.equal(saved.saved, reviews.length);
+    assert.equal(saved.remaining, 0);
+    const reviewed = await f.request('/api/state');
+    assert.equal(Object.keys(reviewed.sites[0].changeReviews).length, reviews.length);
+    assert.equal((await f.tool('website_check_review_changes', { siteId: 'bonoir-nl' })).pending, 0);
+    const page = await worker.fetch(new Request('https://dashboard.test/'), f.env);
+    const html = await page.text();
+    assert.match(html, /Beoordeelde wijzigingen en fouten/);
+    assert.match(html, /changeReviews\[e\.id\]\?\.decision==='meaningful'/);
+    for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(script[1]));
   } finally { f.restore(); }
 });

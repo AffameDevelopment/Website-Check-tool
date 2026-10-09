@@ -23,6 +23,9 @@ const sameHost = (a, b) => { try { return new URL(a).hostname.replace(/^www\./, 
 const slug = value => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'website';
 const APP_BLOCK = /<!--\s*BEGIN app block:\s*(shopify:\/\/apps\/[^>]*?)\s*-->([\s\S]*?)<!--\s*END app block(?:\s*:[^>]*)?\s*-->/gi;
 const maskVolatileHtml = value => String(value || '')
+  .replace(/<!--\s*Performance optimized by Redis Object Cache\.[\s\S]*?-->/gi, '<!-- Redis Object Cache diagnostics -->')
+  .replace(/<!--\s*This website is like a Rocket[\s\S]*?Debug:\s*cached@\d+\s*-->/gi, '<!-- WP Rocket cache diagnostics -->')
+  .replace(/"eventMetadataId"\s*:\s*"[^"]*"/g, '"eventMetadataId":"<rotating>"')
   .replace(/<script\b(?=[^>]*\bid\s*=\s*(["'])__st\1)[^>]*>[\s\S]*?<\/script>/gi, script => script
     .replace(/"reqid"\s*:\s*"[^"]*"/g, '"reqid":"<rotating>"')
     .replace(/"u"\s*:\s*"[^"]*"/g, '"u":"<rotating>"'))

@@ -244,6 +244,20 @@ test('compares Shopify app blocks by identity instead of pairing unrelated apps'
   } finally { f.restore(); }
 });
 
+test('ignores WordPress cache diagnostics and Shopify event metadata IDs', async () => {
+  const f = fixture();
+  try {
+    const beforeKey = 'website-check/snapshots/bonoir-nl/dddddddddddddddddddd/old.json';
+    const afterKey = 'website-check/snapshots/bonoir-nl/dddddddddddddddddddd/new.json';
+    const html = (count, cache, id) => `<html><body><p>Welkom</p><!-- Performance optimized by Redis Object Cache. Opgehaald ${count} objecten van Redis gebruikt PhpRedis. --><!-- This website is like a Rocket, isn't it? Performance optimized by WP Rocket. Debug: cached@${cache} --><script>window.meta={"eventMetadataId":"${id}"}</script></body></html>`;
+    f.objects.set(beforeKey, JSON.stringify({ text: 'Welkom', html: html(3923, 1791558575, 'request-one') }));
+    f.objects.set(afterKey, JSON.stringify({ text: 'Welkom', html: html(3960, 1791558705, 'request-two') }));
+    const diff = await f.request('/api/diff?before=' + encodeURIComponent(beforeKey) + '&after=' + encodeURIComponent(afterKey));
+    assert.equal(diff.ignoredDynamic, true);
+    assert.equal(diff.html.total, 0);
+  } finally { f.restore(); }
+});
+
 test('keeps scan candidates out of the portal until Codex records a review', async () => {
   const f = fixture();
   try {

@@ -26,6 +26,8 @@ const maskVolatileHtml = value => String(value || '')
   .replace(/<!--\s*Performance optimized by Redis Object Cache\.[\s\S]*?-->/gi, '<!-- Redis Object Cache diagnostics -->')
   .replace(/<!--\s*This website is like a Rocket[\s\S]*?Debug:\s*cached@\d+\s*-->/gi, '<!-- WP Rocket cache diagnostics -->')
   .replace(/"eventMetadataId"\s*:\s*"[^"]*"/g, '"eventMetadataId":"<rotating>"')
+  .replace(/(&quot;stocklevel&quot;\s*:\s*)(?:&quot;)?-?\d+(?:\.\d+)?(?:&quot;)?/gi, '$1<rotating>')
+  .replace(/("stocklevel"\s*:\s*)"?-?\d+(?:\.\d+)?"?/gi, '$1<rotating>')
   .replace(/<script\b(?=[^>]*\bid\s*=\s*(["'])__st\1)[^>]*>[\s\S]*?<\/script>/gi, script => script
     .replace(/"reqid"\s*:\s*"[^"]*"/g, '"reqid":"<rotating>"')
     .replace(/"u"\s*:\s*"[^"]*"/g, '"u":"<rotating>"'))
@@ -253,9 +255,9 @@ async function scanSite(site, env) {
         continue;
       }
       const page = extract(result.text, url);
-      const next = { url, title: page.title, description: page.description, prices: page.prices, facts: page.facts, status: result.status, durationMs: result.durationMs, checkedAt: now, textHash: await hash(page.text), htmlHash: await hash(normalizeHtml(result.text)), htmlHashVersion: 3, themeHash: await hash(page.css.join('|') + '|' + page.scripts.join('|')), textSample: page.text.slice(0, 260) };
+      const next = { url, title: page.title, description: page.description, prices: page.prices, facts: page.facts, status: result.status, durationMs: result.durationMs, checkedAt: now, textHash: await hash(page.text), htmlHash: await hash(normalizeHtml(result.text)), htmlHashVersion: 4, themeHash: await hash(page.css.join('|') + '|' + page.scripts.join('|')), textSample: page.text.slice(0, 260) };
       let previousHtmlHash = previous?.htmlHash || null;
-      if (previous && previous.htmlHashVersion !== 3) {
+      if (previous && previous.htmlHashVersion !== 4) {
         const saved = previous.snapshotKey ? await env.BUCKET.get(previous.snapshotKey) : null;
         const snapshot = saved ? JSON.parse(await saved.text()) : null;
         previousHtmlHash = snapshot?.html ? await hash(normalizeHtml(snapshot.html)) : null;

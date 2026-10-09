@@ -184,7 +184,7 @@ test('ignores rotating Shopify request tokens but detects a real HTML change', a
     await f.request('/api/scan', { method: 'POST', body: '{}' });
     const secondState = await f.request('/api/state');
     assert.equal(secondState.sites[0].pages[url].snapshotKey, firstSnapshot);
-    assert.equal(secondState.sites[0].pages[url].htmlHashVersion, 3);
+    assert.equal(secondState.sites[0].pages[url].htmlHashVersion, 4);
     assert.ok(!secondState.sites[0].events.some(event => event.url === url && event.type === 'html'));
     const oldKey = 'website-check/snapshots/bonoir-nl/bbbbbbbbbbbbbbbbbbbb/old.json';
     const newKey = 'website-check/snapshots/bonoir-nl/bbbbbbbbbbbbbbbbbbbb/new.json';
@@ -255,6 +255,26 @@ test('ignores WordPress cache diagnostics and Shopify event metadata IDs', async
     const diff = await f.request('/api/diff?before=' + encodeURIComponent(beforeKey) + '&after=' + encodeURIComponent(afterKey));
     assert.equal(diff.ignoredDynamic, true);
     assert.equal(diff.html.total, 0);
+  } finally { f.restore(); }
+});
+
+test('ignores a hidden stock count while preserving availability changes', async () => {
+  const f = fixture();
+  try {
+    const beforeKey = 'website-check/snapshots/bonoir-nl/eeeeeeeeeeeeeeeeeeee/old.json';
+    const afterKey = 'website-check/snapshots/bonoir-nl/eeeeeeeeeeeeeeeeeeee/new.json';
+    const html = (stocklevel, stockstatus) => `<html><body><div data-product="{&quot;sku&quot;:&quot;Sundy107&quot;,&quot;stocklevel&quot;:${stocklevel},&quot;stockstatus&quot;:&quot;${stockstatus}&quot;}"><p>Handgel</p></div></body></html>`;
+    const readDiff = async (oldHtml, newHtml) => {
+      f.objects.set(beforeKey, JSON.stringify({ text: 'Handgel', html: oldHtml }));
+      f.objects.set(afterKey, JSON.stringify({ text: 'Handgel', html: newHtml }));
+      return f.request('/api/diff?before=' + encodeURIComponent(beforeKey) + '&after=' + encodeURIComponent(afterKey));
+    };
+    const countOnly = await readDiff(html(2362, 'instock'), html(2363, 'instock'));
+    assert.equal(countOnly.ignoredDynamic, true);
+    assert.equal(countOnly.html.total, 0);
+    const availability = await readDiff(html(1, 'instock'), html(0, 'outofstock'));
+    assert.equal(availability.ignoredDynamic, false);
+    assert.ok(availability.html.total > 0);
   } finally { f.restore(); }
 });
 

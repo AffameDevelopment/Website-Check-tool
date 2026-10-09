@@ -6,7 +6,7 @@ Privédashboard voor openbare Shopify- en WooCommerce/WordPress-webshops. De eer
 
 De Site bewaart instellingen en geschiedenis in haar R2-opslag. Voeg websites toe in het dashboard en kies één of twee controles per dag. Een scan leest de homepage, verzend/FAQ-links en XML-sitemaps, en controleert maximaal 30 pagina's per run. Bij grotere sites schuift hij bij de volgende run verder door de sitemap.
 
-Per pagina worden HTTP-status, laadtijd, tekst, HTML, titel, metabeschrijving, prijzen, verzendclaims en CSS/script-referenties vergeleken. De eerste scan legt een nulmeting vast. Latere scans tonen wijzigingen en mogelijke tegenstrijdigheden tussen pagina's. De Site heeft geen OpenAI API-sleutel en roept de OpenAI API niet aan.
+Per pagina worden HTTP-status, laadtijd, tekst, HTML, titel, metabeschrijving, prijzen, verzendclaims en CSS/script-referenties vergeleken. Bij de nulmeting en bij iedere gewijzigde pagina bewaart de Site de volledige opgehaalde HTML en geëxtraheerde tekst als aparte momentopname in R2. Via **Momentopname** en **Bekijk verschil** zijn die versies terug te lezen. De Site heeft geen OpenAI API-sleutel en roept de OpenAI API niet aan.
 
 ## Geplande Codex-taak
 

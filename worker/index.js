@@ -24,7 +24,7 @@ const readState = async env => {
 };
 const writeState = async (env, state) => { state.updatedAt = new Date().toISOString(); await env.BUCKET.put(KEY, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } }); };
 
-async function fetchText(url, limit = 850000) {
+async function fetchText(url, limit = 2000000) {
   const started = Date.now();
   const response = await fetch(url, { headers: { 'user-agent': USER_AGENT, accept: 'text/html,application/xml,text/xml;q=0.9,*/*;q=0.5' }, redirect: 'follow', signal: AbortSignal.timeout(12000) });
   const type = response.headers.get('content-type') || '';
@@ -32,7 +32,8 @@ async function fetchText(url, limit = 850000) {
   if (!/html|xml|text/i.test(type)) return { status: response.status, text: '', durationMs: Date.now() - started, type };
   const length = Number(response.headers.get('content-length') || 0);
   if (length > limit) return { status: response.status, text: '', durationMs: Date.now() - started, type, oversized: true };
-  const text = (await response.text()).slice(0, limit);
+  const text = await response.text();
+  if (text.length > limit) return { status: response.status, text: '', durationMs: Date.now() - started, type, oversized: true };
   return { status: response.status, text, durationMs: Date.now() - started, type };
 }
 
@@ -126,7 +127,11 @@ async function scanSite(site, env) {
       }
       ok++;
       if (!result.text) {
-        site.pages[url] = { ...(previous || {}), url, status: result.status, checkedAt: now, durationMs: result.durationMs };
+        if (result.oversized) {
+          failures++;
+          if (previous?.error !== 'Pagina groter dan scanlimiet (2 MB)') events.push({ at: now, type: 'error', url, summary: 'Pagina groter dan scanlimiet (2 MB)' });
+        }
+        site.pages[url] = { ...(previous || {}), url, status: result.status, error: result.oversized ? 'Pagina groter dan scanlimiet (2 MB)' : null, checkedAt: now, durationMs: result.durationMs };
         continue;
       }
       const page = extract(result.text, url);

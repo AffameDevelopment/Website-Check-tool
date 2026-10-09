@@ -1,25 +1,34 @@
 # Website Check
 
-Privédashboard voor wijzigingen op Shopify- en WooCommerce/WordPress-websites. De eerste website is `https://bonoir.nl/`.
+Privédashboard voor openbare Shopify- en WooCommerce/WordPress-webshops. De eerste website is `https://bonoir.nl/`. De live Site en de geplande Codex-taak gebruiken de JavaScript Worker in `worker/index.js`; de oorspronkelijke Python-scanner blijft beschikbaar als losse lokale variant.
 
-## Wat een scan doet
+## Online dashboard
 
-- Haalt de homepage en XML-sitemaps op en bewaart ontdekte pagina's.
-- Controleert per run maximaal 30 pagina's. Bij grotere sites schuift de scan verder door de sitemap, zodat de dekking zichtbaar en voorspelbaar blijft.
-- Bewaart per pagina HTTP-status, laadtijd, zichtbare tekst, HTML, titel, metabeschrijving, gedetecteerde prijzen en CSS/script-referenties als hashes en samenvattingen.
-- Noteert wijzigingen na de eerste nulmeting en vergelijkt gevonden levertermijnen, besteldeadlines, verzendkosten en drempels voor gratis verzending tussen gecontroleerde pagina's.
-- Bewaart de geschiedenis en instellingen in de `BUCKET` R2-binding van de privé-Site.
+De Site bewaart instellingen en geschiedenis in haar R2-opslag. Voeg websites toe in het dashboard en kies één of twee controles per dag. Een scan leest de homepage, verzend/FAQ-links en XML-sitemaps, en controleert maximaal 30 pagina's per run. Bij grotere sites schuift hij bij de volgende run verder door de sitemap.
 
-Een scan is een steekproef op de ingestelde momenten, geen continue uptimebewaking. Dynamische winkelwagen, checkout, ingelogde pagina's en JavaScript-gerenderde inhoud vallen buiten deze eerste versie. Een CSS-wijziging op dezelfde asset-URL is alleen zichtbaar als de pagina-HTML mee verandert.
+Per pagina worden HTTP-status, laadtijd, tekst, HTML, titel, metabeschrijving, prijzen, verzendclaims en CSS/script-referenties vergeleken. De eerste scan legt een nulmeting vast. Latere scans tonen wijzigingen en mogelijke tegenstrijdigheden tussen pagina's. De Site heeft geen OpenAI API-sleutel en roept de OpenAI API niet aan.
 
-## Codex-cloudtaak
+## Geplande Codex-taak
 
-De Site publiceert een MCP-tool op `/mcp`. Verbind de door Sites aangeboden privéplugin met Codex. Een geplande taak roept om 08:00 en 20:00 (Europe/Amsterdam) `website_check_scan_due` aan, en daarna `website_check_status`. De eerste run maakt de nulmeting. Bij een fout of betekenisvolle wijziging meldt Codex dit; zonder verandering blijft de taak stil.
+De gekoppelde taak draait om 08:00 en 20:00 in `Europe/Amsterdam`. Zij roept `website_check_scan_due` en daarna `website_check_status` op via de privé-Siteplugin. De Site bepaalt per website of die run nodig is. Codex meldt betekenisvolle wijzigingen, tegenstrijdige verzendclaims en fouten; zonder verandering blijft de taak stil.
 
-De tool `website_check_scan_due` gebruikt per website de instelling van één of twee scans per dag. Een website met één scan per dag wordt tijdens de tweede run overgeslagen. Een handmatige scan kan in het dashboard of met `website_check_scan_site`.
+De Siteplugin moet in Codex verbonden zijn. De taak gebruikt geen API-sleutel in de broncode of prompt. Gebruik de knop **Nu controleren** in het dashboard voor een handmatige nulmeting.
 
-De cloudtaak moet de Site en de MCP-koppeling opnieuw openen; er zijn geen API-sleutels in de broncode of taakprompt nodig. De Site zelf haalt openbare pagina's met standaard HTTP-verzoeken op. De OpenAI API wordt niet aangeroepen.
+## Lokale Python-variant
 
-## Broncode
+De bestaande scanner kan zonder extra Python-pakketten worden gebruikt:
 
-`worker/index.js` bevat de Cloudflare Worker en het dashboard. `npm run check` controleert de JavaScript-syntax; `npm run build` maakt het Sites-artefact in `dist/`.
+```bash
+python3 monitor.py scan
+python3 -m http.server 8000
+```
+
+Open `http://localhost:8000/dashboard.html`. Deze variant schrijft naar `data/state.json` en heeft een eigen `sites.json`. Die bestanden zijn niet gekoppeld aan de online Site.
+
+## Ontwikkeling
+
+`npm run check` controleert de syntax van de Worker. `npm run build` maakt het Site-artefact in `dist/`. De Python-variant heeft aparte controles met `python3 -m unittest`.
+
+## Grenzen
+
+De controles vinden één of twee keer per dag plaats en zijn geen continue uptimebewaking. Checkout, ingelogde pagina's en inhoud die pas na JavaScript-uitvoering verschijnt worden niet volledig gemeten. CSS-wijzigingen op dezelfde asset-URL zijn alleen zichtbaar als de pagina-HTML mee verandert. Verzendclaims worden automatisch herkend; controleer gemelde tegenstrijdigheden handmatig. Het aantal bezochte pagina's staat in het dashboard, zodat beperkte dekking zichtbaar is.

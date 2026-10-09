@@ -160,3 +160,43 @@ test('shows focused HTML changes with quick navigation and preserves full snapsh
     for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(script[1]));
   } finally { f.restore(); }
 });
+
+test('ignores rotating Shopify request tokens but detects a real HTML change', async () => {
+  const f = fixture();
+  try {
+    const url = 'https://bonoir.nl/';
+    const html = (requestId, visitorId, metaId, expiry, className = 'old') => '<html><head><meta name="shopify-s" content="' + metaId + '" data-expiration="' + expiry + '"></head><body><div class="' + className + '"><p>Welkom</p></div><script id="__st">var __st={"reqid":"' + requestId + '","u":"' + visitorId + '","p":"product"};</script></body></html>';
+    const firstHtml = html('request-1', 'visitor-1', 'token-1', '1000');
+    const secondHtml = html('request-2', 'visitor-2', 'token-2', '2000');
+    f.pages[url] = firstHtml;
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const firstState = await f.request('/api/state');
+    const firstSnapshot = firstState.sites[0].pages[url].snapshotKey;
+    const legacy = JSON.parse(f.objects.get('website-check/state-v1.json'));
+    legacy.sites[0].pages[url].htmlHash = 'old-raw-html-hash';
+    delete legacy.sites[0].pages[url].htmlHashVersion;
+    f.objects.set('website-check/state-v1.json', JSON.stringify(legacy));
+    f.pages[url] = secondHtml;
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const secondState = await f.request('/api/state');
+    assert.equal(secondState.sites[0].pages[url].snapshotKey, firstSnapshot);
+    assert.equal(secondState.sites[0].pages[url].htmlHashVersion, 2);
+    assert.ok(!secondState.sites[0].events.some(event => event.url === url && event.type === 'html'));
+    const oldKey = 'website-check/snapshots/bonoir-nl/bbbbbbbbbbbbbbbbbbbb/old.json';
+    const newKey = 'website-check/snapshots/bonoir-nl/bbbbbbbbbbbbbbbbbbbb/new.json';
+    f.objects.set(oldKey, JSON.stringify({ text: 'Welkom', html: firstHtml }));
+    f.objects.set(newKey, JSON.stringify({ text: 'Welkom', html: secondHtml }));
+    const noiseDiff = await f.request('/api/diff?before=' + encodeURIComponent(oldKey) + '&after=' + encodeURIComponent(newKey));
+    assert.equal(noiseDiff.ignoredDynamic, true);
+    assert.equal(noiseDiff.html.total, 0);
+    f.pages[url] = html('request-3', 'visitor-3', 'token-3', '3000', 'new');
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const thirdState = await f.request('/api/state');
+    const change = thirdState.sites[0].events.find(event => event.url === url && event.type === 'html');
+    assert.ok(change);
+    assert.equal(change.normalized, true);
+    const realDiff = await f.request('/api/diff?before=' + encodeURIComponent(change.beforeSnapshot) + '&after=' + encodeURIComponent(change.afterSnapshot));
+    assert.ok(realDiff.html.hunks.some(hunk => hunk.before.includes('class="old"') && hunk.after.includes('class="new"')));
+    assert.ok(realDiff.html.hunks.every(hunk => hunk.before !== hunk.after));
+  } finally { f.restore(); }
+});

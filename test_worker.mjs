@@ -134,3 +134,29 @@ test('discovers all review tools with both MCP protocol versions', async () => {
     assert.ok(['website_check_review_bundle', 'website_check_page_text', 'website_check_record_findings'].every(name => names.includes(name)));
   } finally { f.restore(); }
 });
+
+test('shows focused HTML changes with quick navigation and preserves full snapshots', async () => {
+  const f = fixture();
+  try {
+    const beforeKey = 'website-check/snapshots/bonoir-nl/aaaaaaaaaaaaaaaaaaaa/old.json';
+    const afterKey = 'website-check/snapshots/bonoir-nl/aaaaaaaaaaaaaaaaaaaa/new.json';
+    const before = '<html><head><meta name="theme-color" content="#111"></head><body><p>Hallo</p><script>window.token="a"</script></body></html>';
+    const after = '<html><head><meta name="theme-color" content="#222"></head><body><p>Hallo</p><script>window.token="b"</script></body></html>';
+    f.objects.set(beforeKey, JSON.stringify({ text: 'Hallo', html: before }));
+    f.objects.set(afterKey, JSON.stringify({ text: 'Hallo', html: after }));
+    const diff = await f.request('/api/diff?before=' + encodeURIComponent(beforeKey) + '&after=' + encodeURIComponent(afterKey));
+    assert.equal(diff.hasBefore, true);
+    assert.equal(diff.text.total, 0);
+    assert.ok(diff.html.total >= 2);
+    assert.ok(diff.html.hunks.some(hunk => hunk.before.includes('#111') && hunk.after.includes('#222')));
+    assert.ok(diff.html.hunks.some(hunk => hunk.before.includes('window.token="a"') && hunk.after.includes('window.token="b"')));
+    const page = await worker.fetch(new Request('https://dashboard.test/'), f.env);
+    const html = await page.text();
+    assert.match(html, /Alleen wijzigingen/);
+    assert.match(html, /Volledige vergelijking/);
+    assert.match(html, /Vorige wijziging/);
+    assert.match(html, /Volgende wijziging/);
+    assert.match(html, /Bekijk HTML-wijziging/);
+    for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(script[1]));
+  } finally { f.restore(); }
+});

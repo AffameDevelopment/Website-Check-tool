@@ -3,6 +3,7 @@ const MAX_PAGES_PER_RUN = 30;
 const MAX_DISCOVERED = 3000;
 const MAX_EVENTS = 1200;
 const USER_AGENT = 'WebsiteCheck/1.0 (+scheduled site quality monitor)';
+const SNAPSHOT_KEY = /^website-check\/snapshots\/[a-z0-9-]+\/[a-f0-9]{20}\/[a-zA-Z0-9-]+\.json$/;
 
 const seed = () => ({ version: 2, sites: [{ id: 'bonoir-nl', name: 'Bonoir', url: 'https://bonoir.nl/', frequency: 2, enabled: true, cursor: 0, pages: {}, events: [], conflicts: [], reviewedConflicts: [], lastScan: null, lastStatus: 'pending', lastError: null, lastDurationMs: null, discovered: 0, scanned: 0 }], updatedAt: null });
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
@@ -332,13 +333,119 @@ async function recordFindings(env, { siteId, findings }) {
   return { siteId, saved: accepted.length, total: site.reviewedConflicts.length };
 }
 
+function diffTokens(value, mode) {
+  return mode === 'html'
+    ? String(value || '').match(/<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script>|<style\b[^>]*>[\s\S]*?<\/style>|<[^>]+>|[^<]+/gi) || []
+    : String(value || '').match(/\S+\s*/g) || [];
+}
+
+function changedExcerpt(value, mode) {
+  const formatted = mode === 'html' ? value.replace(/></g, '>\n<') : value;
+  if (formatted.length <= 1100) return formatted || '—';
+  return `${formatted.slice(0, 750)}\n… ${formatted.length - 1000} tekens overgeslagen …\n${formatted.slice(-250)}`;
+}
+
+function focusedChange(before, after, mode) {
+  if (Math.max(before.length, after.length) <= 1100) return { before: changedExcerpt(before, mode), after: changedExcerpt(after, mode) };
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix++;
+  const beforeContext = before.slice(Math.max(0, prefix - 80), prefix);
+  const afterContext = before.slice(before.length - suffix, before.length - suffix + 80);
+  return {
+    before: changedExcerpt(beforeContext + before.slice(prefix, before.length - suffix) + afterContext, mode),
+    after: changedExcerpt(beforeContext + after.slice(prefix, after.length - suffix) + afterContext, mode)
+  };
+}
+
+function changeType(before, after, mode) {
+  if (mode === 'text') return 'Zichtbare tekst';
+  const sample = `${before.slice(0, 500)} ${after.slice(0, 500)}`;
+  if (/<script\b|<script\s|__NEXT_DATA__|application\/ld\+json/i.test(sample)) return 'Script of ingebedde gegevens';
+  if (/<style\b|\.css\b|<link\b[^>]*stylesheet/i.test(sample)) return 'CSS of opmaak';
+  if (/<meta\b|<title\b/i.test(sample)) return 'Metadata';
+  if (/<!--/.test(sample)) return 'HTML-opmerking';
+  return 'HTML-element of attribuut';
+}
+
+function compareSnapshots(before, after, mode) {
+  const oldTokens = diffTokens(before, mode);
+  const newTokens = diffTokens(after, mode);
+  if (before === after) return { total: 0, hunks: [], truncated: false };
+  const tooLarge = oldTokens.length > 30000 || newTokens.length > 30000;
+  const matches = [];
+  let limited = tooLarge;
+  if (!tooLarge) {
+    const positions = new Map();
+    for (let index = 0; index < newTokens.length; index++) {
+      const token = newTokens[index];
+      if (!positions.has(token)) positions.set(token, []);
+      const found = positions.get(token);
+      if (found.length <= 50) found.push(index);
+    }
+    const pending = [[0, oldTokens.length, 0, newTokens.length]];
+    let examined = 0;
+    while (pending.length) {
+      const [oldStart, oldEnd, newStart, newEnd] = pending.pop();
+      examined += oldEnd - oldStart;
+      if (examined > 120000) { limited = true; break; }
+      let bestOld = 0, bestNew = 0, bestLength = 0;
+      let previous = new Map();
+      for (let oldIndex = oldStart; oldIndex < oldEnd; oldIndex++) {
+        const current = new Map();
+        const found = positions.get(oldTokens[oldIndex]) || [];
+        if (found.length > 50) { previous = current; continue; }
+        for (const newIndex of found) {
+          if (newIndex < newStart || newIndex >= newEnd) continue;
+          const length = (previous.get(newIndex - 1) || 0) + 1;
+          current.set(newIndex, length);
+          if (length > bestLength) { bestOld = oldIndex - length + 1; bestNew = newIndex - length + 1; bestLength = length; }
+        }
+        previous = current;
+      }
+      if (bestLength) {
+        matches.push([bestOld, bestNew, bestLength]);
+        if (oldStart < bestOld || newStart < bestNew) pending.push([oldStart, bestOld, newStart, bestNew]);
+        if (bestOld + bestLength < oldEnd || bestNew + bestLength < newEnd) pending.push([bestOld + bestLength, oldEnd, bestNew + bestLength, newEnd]);
+      }
+    }
+    matches.sort((a, b) => a[0] - b[0]);
+  }
+  matches.push([oldTokens.length, newTokens.length, 0]);
+  const hunks = [];
+  let oldCursor = 0, newCursor = 0;
+  for (const [oldIndex, newIndex, length] of matches) {
+    if (oldIndex > oldCursor || newIndex > newCursor) {
+      const removed = oldTokens.slice(oldCursor, oldIndex).join('');
+      const added = newTokens.slice(newCursor, newIndex).join('');
+      hunks.push({ kind: changeType(removed, added, mode), ...focusedChange(removed, added, mode), removedLength: removed.length, addedLength: added.length });
+    }
+    oldCursor = oldIndex + length;
+    newCursor = newIndex + length;
+  }
+  if (!hunks.length) hunks.push({ kind: changeType(before, after, mode), ...focusedChange(before, after, mode), removedLength: before.length, addedLength: after.length });
+  return { total: hunks.length, hunks: hunks.slice(0, 100), truncated: limited || hunks.length > 100 };
+}
+
 async function handleApi(request, env, path) {
   if (path === '/api/state' && request.method === 'GET') return json(await readState(env));
   if (path === '/api/snapshot' && request.method === 'GET') {
     const key = new URL(request.url).searchParams.get('key') || '';
-    if (!/^website-check\/snapshots\/[a-z0-9-]+\/[a-f0-9]{20}\/[a-zA-Z0-9-]+\.json$/.test(key)) return json({ error: 'Ongeldige momentopname.' }, 400);
+    if (!SNAPSHOT_KEY.test(key)) return json({ error: 'Ongeldige momentopname.' }, 400);
     const saved = await env.BUCKET.get(key);
     return saved ? json(JSON.parse(await saved.text())) : json({ error: 'Momentopname niet gevonden.' }, 404);
+  }
+  if (path === '/api/diff' && request.method === 'GET') {
+    const params = new URL(request.url).searchParams;
+    const beforeKey = params.get('before') || '';
+    const afterKey = params.get('after') || '';
+    if (!SNAPSHOT_KEY.test(afterKey) || (beforeKey && !SNAPSHOT_KEY.test(beforeKey))) return json({ error: 'Ongeldige momentopname.' }, 400);
+    const [savedBefore, savedAfter] = await Promise.all([beforeKey ? env.BUCKET.get(beforeKey) : null, env.BUCKET.get(afterKey)]);
+    if (!savedAfter || (beforeKey && !savedBefore)) return json({ error: 'Momentopname niet gevonden.' }, 404);
+    const before = savedBefore ? JSON.parse(await savedBefore.text()) : null;
+    const after = JSON.parse(await savedAfter.text());
+    return json({ hasBefore: Boolean(before), text: compareSnapshots(before?.text || '', after.text || '', 'text'), html: compareSnapshots(before?.html || '', after.html || '', 'html') });
   }
   if (path === '/api/sites' && request.method === 'POST') {
     const input = await request.json();
@@ -419,10 +526,112 @@ async function handleMcp(request, env) {
 
 const PAGE = String.raw`<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Website Check</title><style>
 :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e6edf6;background:#0b1421;font-size:16px}*{box-sizing:border-box}body{margin:0}button,input,select{font:inherit}button{cursor:pointer}a{color:#7bc5f7;text-decoration:none}a:hover{text-decoration:underline}.shell{max-width:1440px;margin:auto;padding:34px 40px 60px}.head{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;border-bottom:1px solid #27394d;padding-bottom:28px}.eyebrow{font-size:.76rem;letter-spacing:.16em;text-transform:uppercase;color:#75b9ce;font-weight:700}h1{font-size:2rem;letter-spacing:-.04em;margin:8px 0 4px}h2{font-size:1.16rem;margin:0 0 16px;letter-spacing:-.02em}p{margin:0;color:#a3b2c2}.head .sub{font-size:.95rem}.button{border:1px solid #37556e;background:#15283b;color:#eef6fc;border-radius:10px;padding:11px 16px;font-weight:600;white-space:nowrap}.button:hover{background:#203a53}.button.primary{background:#1c9db8;border-color:#37b3ca;color:#061620}.button:disabled{opacity:.55;cursor:wait}.grid{display:grid;grid-template-columns:290px minmax(0,1fr);gap:24px;margin-top:28px}.sidebar,.panel,.stat{background:#101e2d;border:1px solid #27394d;border-radius:16px}.sidebar{padding:20px;height:max-content}.sidebarhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}.sidebar h2{margin:0}.sitebutton{width:100%;text-align:left;background:transparent;border:1px solid transparent;color:#e6edf6;padding:13px 12px;border-radius:10px;display:block;margin:4px 0}.sitebutton.active{background:#183449;border-color:#31637a}.sitebutton span{display:block;font-weight:650}.sitebutton small{display:block;color:#9aaec0;margin-top:4px;font-size:.8rem}.add{width:100%;margin-top:12px}.main{min-width:0}.site-top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}.site-top h2{font-size:1.55rem;margin:0 0 4px}.site-top p{font-size:.9rem}.actions{display:flex;gap:8px}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}.stat{padding:18px}.stat label{display:block;color:#9aafbf;font-size:.83rem;margin-bottom:9px}.stat strong{font-size:1.3rem;letter-spacing:-.03em}.stat small{display:block;color:#8ba1b2;margin-top:5px;font-size:.78rem}.two{display:grid;grid-template-columns:1.1fr .9fr;gap:18px;margin-bottom:18px}.panel{padding:22px;margin-bottom:18px}.panelhead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px}.panelhead h2{margin:0}.list{display:grid;gap:10px}.event,.claim,.page-row{border:1px solid #27394d;background:#132337;border-radius:10px;padding:13px 14px}.eventtop{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.badge{padding:4px 8px;border-radius:999px;font-size:.74rem;font-weight:700;background:#23465b;color:#8bd6ed}.badge.price{background:#46381e;color:#f7cd72}.badge.error,.badge.conflict{background:#4b2a2d;color:#f6a7aa}.badge.theme{background:#3a3157;color:#cbb6fa}.badge.ok{background:#1d493e;color:#7de0bd}.event p,.claim p{font-size:.86rem;margin-top:7px;overflow-wrap:anywhere}.event time{color:#93a6b7;font-size:.78rem}.claim strong{font-size:.92rem}.evidence{margin:10px 0;padding:12px;background:#0c1b2c;border-left:3px solid #4bb3ca;border-radius:6px}.evidence .quote{line-height:1.45;font-size:.9rem;margin-bottom:5px}.evidence a{font-size:.82rem;overflow-wrap:anywhere}.claim p{line-height:1.4}.muted{color:#91a6b7;font-size:.88rem}.empty{padding:24px;text-align:center;border:1px dashed #355067;border-radius:10px;color:#9bafbf;font-size:.9rem}.pages{max-height:330px;overflow:auto}.page-row{display:flex;justify-content:space-between;gap:10px;font-size:.87rem;margin-bottom:8px}.page-row a{overflow-wrap:anywhere}.page-row span{white-space:nowrap;color:#a1b4c2}.notice{padding:12px 15px;background:#183449;border:1px solid #31637a;border-radius:10px;margin-bottom:18px;color:#cae9f1;font-size:.88rem}dialog{background:#111f2d;color:#e6edf6;border:1px solid #3b546a;border-radius:16px;box-shadow:0 25px 80px #0009;width:min(460px,calc(100vw - 30px));padding:26px}dialog::backdrop{background:#06101bc9}dialog h2{margin-bottom:14px}form{display:grid;gap:13px}form label{display:grid;gap:6px;font-size:.87rem;color:#adbfcd}input,select{background:#0b1724;border:1px solid #40566a;color:#eef6fc;border-radius:9px;padding:11px 12px;width:100%}.formactions{display:flex;justify-content:flex-end;gap:9px;margin-top:12px}.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}@media(max-width:1000px){.grid{grid-template-columns:1fr}.sidebar{display:block}.sites{display:flex;overflow:auto;gap:6px}.sitebutton{min-width:170px}.two{grid-template-columns:1fr}}@media(max-width:680px){.shell{padding:22px 16px 40px}.head,.site-top{flex-direction:column;align-items:stretch}.stats{grid-template-columns:repeat(2,1fr)}.head h1{font-size:1.65rem}.actions{width:100%}.actions .button{flex:1}.panel{padding:17px}.stat{padding:15px}}
+.diff-dialog{width:min(1180px,calc(100vw - 24px));max-height:92vh;overflow:auto}.diff-controls{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0}.diff-controls label{min-width:200px}.diff-nav{display:flex;align-items:center;gap:9px;position:sticky;top:-26px;padding:10px 0;background:#111f2d;z-index:1}.diff-nav .muted{margin-right:auto}.diff-hunks{display:grid;gap:12px;margin-top:8px}.diff-hunk{border:1px solid #34546b;border-radius:12px;padding:14px;background:#122539;scroll-margin-top:75px}.diff-hunk.active{border-color:#75c7df;box-shadow:0 0 0 2px #75c7df33}.diff-hunk h3{margin:0 0 12px;font-size:.94rem}.diff-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.diff-columns h3{font-size:.86rem;margin:0 0 7px}.diff-columns pre{white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;max-height:55vh;background:#0b1724;border-radius:9px;padding:13px;font-size:.79rem;line-height:1.5;margin:0}.diff-before{border-left:3px solid #e69494;background:#321f2a!important}.diff-after{border-left:3px solid #77cfab;background:#16352e!important}[hidden]{display:none!important}@media(max-width:680px){.diff-columns{grid-template-columns:1fr}.diff-nav{flex-wrap:wrap}}
 </style></head><body><div class="shell"><header class="head"><div><div class="eyebrow">CONTROLECENTRUM</div><h1>Website Check</h1><p class="sub">Wijzigingen, claims en bereikbaarheid op één plek.</p></div><button id="scanAll" class="button primary">Controleer websites</button></header><div class="grid"><aside class="sidebar"><div class="sidebarhead"><h2>Websites</h2><span id="siteCount" class="muted"></span></div><div id="sites" class="sites"></div><button id="addSite" class="button add">Website toevoegen</button></aside><main id="main" class="main"><div class="empty">Dashboard laden…</div></main></div></div><dialog id="editor"><h2 id="editorTitle">Website toevoegen</h2><form id="siteForm"><input type="hidden" name="id"><label>Naam<input name="name" maxlength="80" required placeholder="Naam van de website"></label><label>Website URL<input name="url" type="url" required placeholder="https://voorbeeld.nl/"></label><label>Controlefrequentie<select name="frequency"><option value="1">1 keer per dag</option><option value="2">2 keer per dag</option></select></label><div class="formactions"><button type="button" class="button" id="cancel">Annuleren</button><button class="button primary" type="submit">Opslaan</button></div></form></dialog><script>
-const $=s=>document.querySelector(s);let state=null,selected=null,busy=false;const formatDate=s=>s?new Intl.DateTimeFormat('nl-NL',{dateStyle:'medium',timeStyle:'short',timeZone:'Europe/Amsterdam'}).format(new Date(s)):'Nog niet gecontroleerd';const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const tag=t=>({'price':'Prijs','text':'Tekst','html':'HTML','theme':'Thema','meta':'Metadata','facts':'Claims','error':'Fout','recovery':'Hersteld','conflict':'Tegenstrijdig'}[t]||t);async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||'Er ging iets mis.');return d}async function refresh(){try{state=await api('/api/state');selected=state.sites.some(x=>x.id===selected)?selected:state.sites[0]?.id;render()}catch(e){$('#main').innerHTML='<div class="empty">'+escape(e.message)+'</div>'}}function render(){const sites=state.sites;$('#siteCount').textContent=sites.length;$('#sites').innerHTML=sites.map(s=>'<button class="sitebutton '+(s.id===selected?'active':'')+'" data-id="'+escape(s.id)+'"><span>'+escape(s.name)+'</span><small>'+escape(new URL(s.url).hostname)+' · '+(s.frequency===2?'2×':'1×')+' per dag</small></button>').join('');document.querySelectorAll('.sitebutton').forEach(b=>b.onclick=()=>{selected=b.dataset.id;render()});const s=sites.find(x=>x.id===selected);if(!s){$('#main').innerHTML='<div class="empty">Voeg een website toe om te beginnen.</div>';return}const pages=Object.values(s.pages||{}).sort((a,b)=>(a.status>=400?-1:0)-(b.status>=400?-1:0));const events=(s.events||[]).slice(0,40);const conflicts=s.reviewedConflicts||[];const status=s.lastStatus==='ok'?'Bereikbaar':s.lastStatus==='warning'?'Deels bereikbaar':s.lastStatus==='error'?'Fout':'Nog geen scan';$('#main').innerHTML='<div class="site-top"><div><h2>'+escape(s.name)+'</h2><p><a href="'+escape(s.url)+'" target="_blank" rel="noopener noreferrer">'+escape(s.url)+'</a> · Laatste controle: '+formatDate(s.lastScan)+'</p></div><div class="actions"><button class="button" id="editSite">Instellen</button><button class="button primary" id="scanSite" '+(busy?'disabled':'')+'>Nu controleren</button></div></div>'+(s.lastError?'<div class="notice">'+escape(s.lastError)+'</div>':'')+'<div class="stats"><div class="stat"><label>Status</label><strong>'+escape(status)+'</strong><small>'+escape(s.scanned||0)+' pagina’s gecontroleerd</small></div><div class="stat"><label>Ontdekte pagina’s</label><strong>'+escape(s.discovered||0)+'</strong><small>via sitemap</small></div><div class="stat"><label>Wijzigingen</label><strong>'+events.length+'</strong><small>recent opgeslagen</small></div><div class="stat"><label>Tegenstrijdigheden</label><strong>'+conflicts.length+'</strong><small>met gecontroleerde broncitaten</small></div></div><div class="two"><section class="panel"><div class="panelhead"><h2>Beoordeelde tegenstrijdigheden</h2></div><div class="list">'+(conflicts.length?conflicts.map(c=>'<div class="claim"><strong>'+escape(c.kind)+'</strong><p class="muted">'+escape(c.explanation||(c.source==='number'?'Dezelfde uitspraak bevat verschillende getallen.':c.source==='polarity'?'Een uitspraak wordt bevestigd en ontkend.':'Dezelfde aanduiding heeft verschillende antwoorden.'))+'</p>'+c.values.map(v=>{const p=v.pages?.[0];return '<div class="evidence"><div class="quote">“'+escape(p?.phrase||v.value)+'”</div>'+(p?'<a target="_blank" rel="noopener noreferrer" href="'+escape(p.url)+'">'+escape(new URL(p.url).pathname||'/')+'</a>':'')+(v.pages.length>1?'<span class="muted"> · ook op '+escape(v.pages.length-1)+' andere pagina’s</span>':'')+'</div>'}).join('')+'<small class="muted">'+'Beoordeeld door Codex'+'</small></div>').join(''):'<div class="empty">Nog geen door Codex bevestigde tegenstrijdigheden.</div>')+'</div></section><section class="panel"><div class="panelhead"><h2>Bereikbaarheid</h2></div><div class="list"><div class="claim"><strong>Laatste scan</strong><p>'+formatDate(s.lastScan)+'</p><p>'+escape(s.lastDurationMs?Math.round(s.lastDurationMs/1000)+' sec':'—')+' · '+escape(s.frequency)+' keer per dag</p></div><div class="claim"><strong>Fouten</strong><p>'+escape(pages.filter(p=>p.status>=400||p.error).length)+' pagina’s met een fout in de laatste controles</p></div></div></section></div><section class="panel"><div class="panelhead"><h2>Wijzigingen en fouten</h2><span class="muted">nieuwste eerst</span></div><div class="list">'+(events.length?events.map(e=>'<div class="event"><div class="eventtop"><span class="badge '+escape(e.type)+'">'+escape(tag(e.type))+'</span><strong>'+escape(e.summary)+'</strong><time>'+formatDate(e.at)+'</time></div><p><a target="_blank" rel="noopener noreferrer" href="'+escape(e.url)+'">'+escape(e.url)+'</a></p>'+(e.afterSnapshot?'<button class="button diffbutton" data-before="'+escape(e.beforeSnapshot||'')+'" data-after="'+escape(e.afterSnapshot)+'">Bekijk verschil</button>':'')+'</div>').join(''):'<div class="empty">De eerste scan legt de nulmeting vast. Daarna verschijnen wijzigingen hier.</div>')+'</div></section><section class="panel"><div class="panelhead"><h2>Gecontroleerde pagina’s</h2><span class="muted">'+pages.length+' opgeslagen</span></div><div class="pages">'+(pages.length?pages.slice(0,80).map(p=>'<div class="page-row"><a target="_blank" rel="noopener noreferrer" href="'+escape(p.url)+'">'+escape(p.title||new URL(p.url).pathname||'/')+'</a><span>HTTP '+escape(p.status||'—')+(p.snapshotKey?' · <button class="button diffbutton" data-before="" data-after="'+escape(p.snapshotKey)+'">Momentopname</button>':'')+'</span></div>').join(''):'<div class="empty">Nog geen pagina’s gecontroleerd.</div>')+'</div></section>';$('#editSite').onclick=()=>openEditor(s);$('#scanSite').onclick=()=>scan(s.id)}$('#addSite').onclick=()=>openEditor(null);$('#cancel').onclick=()=>$('#editor').close();$('#siteForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);try{await api('/api/sites',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(Object.fromEntries(f))});$('#editor').close();await refresh()}catch(err){alert(err.message)}};$('#scanAll').onclick=()=>scan(null);function openEditor(site){$('#editorTitle').textContent=site?'Website instellen':'Website toevoegen';const form=$('#siteForm');form.elements.id.value=site?.id||'';form.elements.name.value=site?.name||'';form.elements.url.value=site?.url||'';form.elements.frequency.value=site?.frequency||2;$('#editor').showModal()}async function scan(siteId){if(busy)return;busy=true;$('#scanAll').disabled=true;$('#scanAll').textContent='Controleren…';render();try{await api('/api/scan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(siteId?{siteId}:{})});await refresh()}catch(e){alert(e.message)}finally{busy=false;$('#scanAll').disabled=false;$('#scanAll').textContent='Controleer websites';render()}}refresh();
+const $=s=>document.querySelector(s);let state=null,selected=null,busy=false;const formatDate=s=>s?new Intl.DateTimeFormat('nl-NL',{dateStyle:'medium',timeStyle:'short',timeZone:'Europe/Amsterdam'}).format(new Date(s)):'Nog niet gecontroleerd';const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const tag=t=>({'price':'Prijs','text':'Tekst','html':'HTML','theme':'Thema','meta':'Metadata','facts':'Claims','error':'Fout','recovery':'Hersteld','conflict':'Tegenstrijdig'}[t]||t);async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||'Er ging iets mis.');return d}async function refresh(){try{state=await api('/api/state');selected=state.sites.some(x=>x.id===selected)?selected:state.sites[0]?.id;render()}catch(e){$('#main').innerHTML='<div class="empty">'+escape(e.message)+'</div>'}}function render(){const sites=state.sites;$('#siteCount').textContent=sites.length;$('#sites').innerHTML=sites.map(s=>'<button class="sitebutton '+(s.id===selected?'active':'')+'" data-id="'+escape(s.id)+'"><span>'+escape(s.name)+'</span><small>'+escape(new URL(s.url).hostname)+' · '+(s.frequency===2?'2×':'1×')+' per dag</small></button>').join('');document.querySelectorAll('.sitebutton').forEach(b=>b.onclick=()=>{selected=b.dataset.id;render()});const s=sites.find(x=>x.id===selected);if(!s){$('#main').innerHTML='<div class="empty">Voeg een website toe om te beginnen.</div>';return}const pages=Object.values(s.pages||{}).sort((a,b)=>(a.status>=400?-1:0)-(b.status>=400?-1:0));const events=(s.events||[]).slice(0,40);const conflicts=s.reviewedConflicts||[];const status=s.lastStatus==='ok'?'Bereikbaar':s.lastStatus==='warning'?'Deels bereikbaar':s.lastStatus==='error'?'Fout':'Nog geen scan';$('#main').innerHTML='<div class="site-top"><div><h2>'+escape(s.name)+'</h2><p><a href="'+escape(s.url)+'" target="_blank" rel="noopener noreferrer">'+escape(s.url)+'</a> · Laatste controle: '+formatDate(s.lastScan)+'</p></div><div class="actions"><button class="button" id="editSite">Instellen</button><button class="button primary" id="scanSite" '+(busy?'disabled':'')+'>Nu controleren</button></div></div>'+(s.lastError?'<div class="notice">'+escape(s.lastError)+'</div>':'')+'<div class="stats"><div class="stat"><label>Status</label><strong>'+escape(status)+'</strong><small>'+escape(s.scanned||0)+' pagina’s gecontroleerd</small></div><div class="stat"><label>Ontdekte pagina’s</label><strong>'+escape(s.discovered||0)+'</strong><small>via sitemap</small></div><div class="stat"><label>Wijzigingen</label><strong>'+events.length+'</strong><small>recent opgeslagen</small></div><div class="stat"><label>Tegenstrijdigheden</label><strong>'+conflicts.length+'</strong><small>met gecontroleerde broncitaten</small></div></div><div class="two"><section class="panel"><div class="panelhead"><h2>Beoordeelde tegenstrijdigheden</h2></div><div class="list">'+(conflicts.length?conflicts.map(c=>'<div class="claim"><strong>'+escape(c.kind)+'</strong><p class="muted">'+escape(c.explanation||(c.source==='number'?'Dezelfde uitspraak bevat verschillende getallen.':c.source==='polarity'?'Een uitspraak wordt bevestigd en ontkend.':'Dezelfde aanduiding heeft verschillende antwoorden.'))+'</p>'+c.values.map(v=>{const p=v.pages?.[0];return '<div class="evidence"><div class="quote">“'+escape(p?.phrase||v.value)+'”</div>'+(p?'<a target="_blank" rel="noopener noreferrer" href="'+escape(p.url)+'">'+escape(new URL(p.url).pathname||'/')+'</a>':'')+(v.pages.length>1?'<span class="muted"> · ook op '+escape(v.pages.length-1)+' andere pagina’s</span>':'')+'</div>'}).join('')+'<small class="muted">'+'Beoordeeld door Codex'+'</small></div>').join(''):'<div class="empty">Nog geen door Codex bevestigde tegenstrijdigheden.</div>')+'</div></section><section class="panel"><div class="panelhead"><h2>Bereikbaarheid</h2></div><div class="list"><div class="claim"><strong>Laatste scan</strong><p>'+formatDate(s.lastScan)+'</p><p>'+escape(s.lastDurationMs?Math.round(s.lastDurationMs/1000)+' sec':'—')+' · '+escape(s.frequency)+' keer per dag</p></div><div class="claim"><strong>Fouten</strong><p>'+escape(pages.filter(p=>p.status>=400||p.error).length)+' pagina’s met een fout in de laatste controles</p></div></div></section></div><section class="panel"><div class="panelhead"><h2>Wijzigingen en fouten</h2><span class="muted">nieuwste eerst</span></div><div class="list">'+(events.length?events.map(e=>'<div class="event"><div class="eventtop"><span class="badge '+escape(e.type)+'">'+escape(tag(e.type))+'</span><strong>'+escape(e.summary)+'</strong><time>'+formatDate(e.at)+'</time></div><p><a target="_blank" rel="noopener noreferrer" href="'+escape(e.url)+'">'+escape(e.url)+'</a></p>'+(e.type==='html'?'<p class="muted">Zichtbare tekst gelijk; de wijziging zit in de HTML-code.</p>':'')+(e.afterSnapshot?'<button class="button diffbutton" data-type="'+escape(e.type)+'" data-before="'+escape(e.beforeSnapshot||'')+'" data-after="'+escape(e.afterSnapshot)+'">'+(e.type==='html'?'Bekijk HTML-wijziging':'Bekijk verschil')+'</button>':'')+'</div>').join(''):'<div class="empty">De eerste scan legt de nulmeting vast. Daarna verschijnen wijzigingen hier.</div>')+'</div></section><section class="panel"><div class="panelhead"><h2>Gecontroleerde pagina’s</h2><span class="muted">'+pages.length+' opgeslagen</span></div><div class="pages">'+(pages.length?pages.slice(0,80).map(p=>'<div class="page-row"><a target="_blank" rel="noopener noreferrer" href="'+escape(p.url)+'">'+escape(p.title||new URL(p.url).pathname||'/')+'</a><span>HTTP '+escape(p.status||'—')+(p.snapshotKey?' · <button class="button diffbutton" data-before="" data-after="'+escape(p.snapshotKey)+'">Momentopname</button>':'')+'</span></div>').join(''):'<div class="empty">Nog geen pagina’s gecontroleerd.</div>')+'</div></section>';$('#editSite').onclick=()=>openEditor(s);$('#scanSite').onclick=()=>scan(s.id)}$('#addSite').onclick=()=>openEditor(null);$('#cancel').onclick=()=>$('#editor').close();$('#siteForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);try{await api('/api/sites',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(Object.fromEntries(f))});$('#editor').close();await refresh()}catch(err){alert(err.message)}};$('#scanAll').onclick=()=>scan(null);function openEditor(site){$('#editorTitle').textContent=site?'Website instellen':'Website toevoegen';const form=$('#siteForm');form.elements.id.value=site?.id||'';form.elements.name.value=site?.name||'';form.elements.url.value=site?.url||'';form.elements.frequency.value=site?.frequency||2;$('#editor').showModal()}async function scan(siteId){if(busy)return;busy=true;$('#scanAll').disabled=true;$('#scanAll').textContent='Controleren…';render();try{await api('/api/scan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(siteId?{siteId}:{})});await refresh()}catch(e){alert(e.message)}finally{busy=false;$('#scanAll').disabled=false;$('#scanAll').textContent='Controleer websites';render()}}refresh();
 </script><script>
-document.addEventListener('click',async event=>{const button=event.target.closest('.diffbutton');if(!button)return;button.disabled=true;try{const [before,after]=await Promise.all([button.dataset.before?api('/api/snapshot?key='+encodeURIComponent(button.dataset.before)):Promise.resolve(null),api('/api/snapshot?key='+encodeURIComponent(button.dataset.after))]);let dialog=document.querySelector('#diffDialog');if(!dialog){dialog=document.createElement('dialog');dialog.id='diffDialog';dialog.style.width='min(1100px,calc(100vw - 30px))';dialog.innerHTML='<div class="panelhead"><h2>Momentopnames vergelijken</h2><button class="button" id="closeDiff">Sluiten</button></div><label class="muted">Inhoud <select id="diffMode"><option value="text">Zichtbare tekst</option><option value="html">HTML-bron</option></select></label><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-top:15px"><section><h3>Vorige meting</h3><pre id="diffBefore" style="white-space:pre-wrap;overflow:auto;max-height:65vh;background:#0b1724;border-radius:9px;padding:14px;font-size:.82rem"></pre></section><section><h3>Nieuwe meting</h3><pre id="diffAfter" style="white-space:pre-wrap;overflow:auto;max-height:65vh;background:#0b1724;border-radius:9px;padding:14px;font-size:.82rem"></pre></section></div>';document.body.appendChild(dialog);dialog.querySelector('#closeDiff').onclick=()=>dialog.close()}dialog.querySelector('#diffMode').value='text';const show=()=>{const mode=dialog.querySelector('#diffMode').value;dialog.querySelector('#diffBefore').textContent=before?.[mode]||'Geen eerdere momentopname';dialog.querySelector('#diffAfter').textContent=after?.[mode]||''};dialog.querySelector('#diffMode').onchange=show;show();dialog.showModal()}catch(error){alert(error.message)}finally{button.disabled=false}});
+document.addEventListener('click', async event => {
+  const button = event.target.closest('.diffbutton');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const params = new URLSearchParams({ after: button.dataset.after });
+    if (button.dataset.before) params.set('before', button.dataset.before);
+    const [before, after, diff] = await Promise.all([
+      button.dataset.before ? api('/api/snapshot?key=' + encodeURIComponent(button.dataset.before)) : Promise.resolve(null),
+      api('/api/snapshot?key=' + encodeURIComponent(button.dataset.after)),
+      api('/api/diff?' + params.toString())
+    ]);
+    let dialog = document.querySelector('#diffDialog');
+    if (!dialog) {
+      dialog = document.createElement('dialog');
+      dialog.id = 'diffDialog';
+      dialog.className = 'diff-dialog';
+      dialog.innerHTML = '<div class="panelhead"><h2>Momentopnames vergelijken</h2><button class="button" id="closeDiff">Sluiten</button></div>' +
+        '<div class="diff-controls"><label>Inhoud<select id="diffMode"><option value="text">Zichtbare tekst</option><option value="html">HTML-bron</option></select></label>' +
+        '<label>Weergave<select id="diffView"><option value="changes">Alleen wijzigingen</option><option value="full">Volledige vergelijking</option></select></label></div>' +
+        '<p id="diffNote" class="muted" aria-live="polite"></p>' +
+        '<div id="diffOnly"><div class="diff-nav"><span id="diffCount" class="muted" aria-live="polite"></span><button class="button" id="diffPrev">Vorige wijziging</button><button class="button" id="diffNext">Volgende wijziging</button></div><div id="diffHunks" class="diff-hunks"></div></div>' +
+        '<div id="diffFull" class="diff-columns" hidden><section><h3>Vorige meting</h3><pre id="diffBefore"></pre></section><section><h3>Nieuwe meting</h3><pre id="diffAfter"></pre></section></div>';
+      document.body.appendChild(dialog);
+      dialog.querySelector('#closeDiff').onclick = () => dialog.close();
+    }
+    dialog.querySelector('#diffMode').value = button.dataset.type === 'html' || button.dataset.type === 'theme' ? 'html' : 'text';
+    dialog.querySelector('#diffView').value = before ? 'changes' : 'full';
+    const renderDiff = () => {
+      const mode = dialog.querySelector('#diffMode').value;
+      const view = dialog.querySelector('#diffView').value;
+      const result = diff[mode];
+      const showChanges = view === 'changes' && diff.hasBefore;
+      dialog.querySelector('#diffOnly').hidden = !showChanges;
+      dialog.querySelector('#diffFull').hidden = showChanges;
+      dialog.querySelector('#diffBefore').textContent = before?.[mode] || 'Geen eerdere momentopname';
+      dialog.querySelector('#diffAfter').textContent = after?.[mode] || '';
+      const note = dialog.querySelector('#diffNote');
+      if (!diff.hasBefore) note.textContent = 'Dit is de eerste opgeslagen momentopname van deze pagina.';
+      else if (mode === 'text' && result.total === 0) note.textContent = 'De zichtbare tekst is gelijk gebleven. Kies HTML-bron om technische wijzigingen te bekijken.';
+      else if (mode === 'html' && diff.text.total === 0) note.textContent = 'De zichtbare tekst is gelijk gebleven; hieronder staan de gewijzigde HTML-fragmenten.';
+      else note.textContent = 'Vergelijk de gemarkeerde fragmenten of open de volledige versie.';
+      const container = dialog.querySelector('#diffHunks');
+      container.replaceChildren();
+      const count = dialog.querySelector('#diffCount');
+      const prev = dialog.querySelector('#diffPrev');
+      const next = dialog.querySelector('#diffNext');
+      if (!result.hunks.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = 'Geen verschillen in deze inhoud.';
+        container.appendChild(empty);
+        count.textContent = '0 wijzigingen';
+        prev.disabled = true;
+        next.disabled = true;
+        return;
+      }
+      result.hunks.forEach((hunk, index) => {
+        const card = document.createElement('section');
+        card.className = 'diff-hunk';
+        const heading = document.createElement('h3');
+        heading.textContent = (index + 1) + '. ' + hunk.kind;
+        card.appendChild(heading);
+        const columns = document.createElement('div');
+        columns.className = 'diff-columns';
+        for (const [label, value, className] of [['Voor', hunk.before, 'diff-before'], ['Na', hunk.after, 'diff-after']]) {
+          const section = document.createElement('section');
+          const title = document.createElement('h3');
+          title.textContent = label;
+          const snippet = document.createElement('pre');
+          snippet.className = className;
+          snippet.textContent = value;
+          section.append(title, snippet);
+          columns.appendChild(section);
+        }
+        card.appendChild(columns);
+        container.appendChild(card);
+      });
+      const cards = [...container.querySelectorAll('.diff-hunk')];
+      let current = 0;
+      const select = (index, scroll) => {
+        current = Math.max(0, Math.min(cards.length - 1, index));
+        cards.forEach((card, item) => card.classList.toggle('active', item === current));
+        count.textContent = 'Wijziging ' + (current + 1) + ' van ' + result.total + (result.truncated ? ' (eerste ' + cards.length + ' getoond)' : '');
+        prev.disabled = current === 0;
+        next.disabled = current === cards.length - 1;
+        if (scroll) cards[current].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      };
+      prev.onclick = () => select(current - 1, true);
+      next.onclick = () => select(current + 1, true);
+      select(0, false);
+    };
+    dialog.querySelector('#diffMode').onchange = renderDiff;
+    dialog.querySelector('#diffView').onchange = renderDiff;
+    renderDiff();
+    dialog.showModal();
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 </script></body></html>`;
 
 export default { async fetch(request, env) {

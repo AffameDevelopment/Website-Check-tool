@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "delay_seconds": 0.25,
+      "frequency_per_day": 2,
+      "max_pages": 100,
+      "name": "Bonoir",
+      "timezone": "Europe/Amsterdam",
+      "url": "https://bonoir.nl/"
+    }
+  ]
+}

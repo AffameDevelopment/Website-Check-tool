@@ -330,22 +330,33 @@ async function handleApi(request, env, path) {
   return json({ error: 'Niet gevonden.' }, 404);
 }
 
+const MCP_TOOLS = [
+  { name: 'website_check_status', description: 'Lees de websites, laatste scans, recente wijzigingen en mogelijke tegenstrijdigheden.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'website_check_scan_due', description: 'Scan ingeschakelde websites waarvan de controle volgens hun frequentie nodig is. Sla bevindingen op.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'website_check_scan_site', description: 'Scan één website nu en sla de bevindingen op.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' } }, required: ['siteId'] } },
+  { name: 'website_check_review_bundle', description: 'Lees claims en tekstfragmenten van gecontroleerde pagina’s om inhoudelijke tegenstrijdigheden te beoordelen.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' } }, required: ['siteId'] } },
+  { name: 'website_check_page_text', description: 'Lees de actuele zichtbare tekst van één gecontroleerde pagina voor broncontrole.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' }, url: { type: 'string' } }, required: ['siteId', 'url'] } },
+  { name: 'website_check_record_findings', description: 'Sla inhoudelijk beoordeelde tegenstrijdigheden met geverifieerde broncitaten op.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' }, findings: { type: 'array', maxItems: 20, items: { type: 'object', properties: { subject: { type: 'string' }, explanation: { type: 'string' }, evidence: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'object', properties: { url: { type: 'string' }, quote: { type: 'string' } }, required: ['url', 'quote'] } } }, required: ['subject', 'explanation', 'evidence'] } } }, required: ['siteId', 'findings'] } }
+];
+
 async function handleMcp(request, env) {
   if (request.method !== 'POST') return json({ error: 'POST vereist.' }, 405);
   const body = await request.json();
   const id = body.id ?? null;
   const response = result => json({ jsonrpc: '2.0', id, result });
+  const modern = body.params?._meta?.['io.modelcontextprotocol/protocolVersion'] === '2026-07-28' || request.headers.get('mcp-protocol-version') === '2026-07-28';
+  if (body.method === 'server/discover') return response({
+    resultType: 'complete',
+    supportedVersions: ['2026-07-28', '2025-03-26'],
+    capabilities: { tools: {} },
+    _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'website-check', version: '1.1.0' } },
+    ttlMs: 0,
+    cacheScope: 'public'
+  });
   if (body.method === 'notifications/initialized') return new Response(null, { status: 202 });
-  if (body.method === 'initialize') return response({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'website-check', version: '1.0.0' } });
+  if (body.method === 'initialize') return response({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'website-check', version: '1.1.0' } });
   if (body.method === 'ping') return response({});
-  if (body.method === 'tools/list') return response({ tools: [
-    { name: 'website_check_status', description: 'Lees de websites, laatste scans, recente wijzigingen en mogelijke tegenstrijdigheden.', inputSchema: { type: 'object', properties: {} } },
-    { name: 'website_check_scan_due', description: 'Scan ingeschakelde websites waarvan de controle volgens hun frequentie nodig is. Sla bevindingen op.', inputSchema: { type: 'object', properties: {} } },
-    { name: 'website_check_scan_site', description: 'Scan één website nu en sla de bevindingen op.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' } }, required: ['siteId'] } },
-    { name: 'website_check_review_bundle', description: 'Lees claims en tekstfragmenten van gecontroleerde pagina’s om inhoudelijke tegenstrijdigheden te beoordelen.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' } }, required: ['siteId'] } },
-    { name: 'website_check_page_text', description: 'Lees de actuele zichtbare tekst van één gecontroleerde pagina voor broncontrole.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' }, url: { type: 'string' } }, required: ['siteId', 'url'] } },
-    { name: 'website_check_record_findings', description: 'Sla inhoudelijk beoordeelde tegenstrijdigheden met geverifieerde broncitaten op.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' }, findings: { type: 'array', maxItems: 20, items: { type: 'object', properties: { subject: { type: 'string' }, explanation: { type: 'string' }, evidence: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'object', properties: { url: { type: 'string' }, quote: { type: 'string' } }, required: ['url', 'quote'] } } }, required: ['subject', 'explanation', 'evidence'] } } }, required: ['siteId', 'findings'] } }
-  ] });
+  if (body.method === 'tools/list') return response(modern ? { resultType: 'complete', tools: MCP_TOOLS, ttlMs: 0, cacheScope: 'public' } : { tools: MCP_TOOLS });
   if (body.method === 'tools/call') {
     const name = body.params?.name;
     let data;
@@ -358,7 +369,7 @@ async function handleMcp(request, env) {
     else if (name === 'website_check_page_text') data = await pageText(env, body.params?.arguments?.siteId, body.params?.arguments?.url);
     else if (name === 'website_check_record_findings') data = await recordFindings(env, body.params?.arguments || {});
     else return json({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Tool niet gevonden.' } });
-    return response({ content: [{ type: 'text', text: JSON.stringify(data) }] });
+    return response({ ...(modern ? { resultType: 'complete' } : {}), content: [{ type: 'text', text: JSON.stringify(data) }] });
   }
   return json({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Methode niet gevonden.' } });
 }

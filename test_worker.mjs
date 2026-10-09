@@ -79,3 +79,18 @@ test('removes legacy shipping conflicts during state migration', async () => {
     assert.ok(!('claims' in state.sites[0]));
   } finally { f.restore(); }
 });
+
+test('discovers all review tools with both MCP protocol versions', async () => {
+  const f = fixture();
+  try {
+    const rpc = (method, params = {}) => f.request('/mcp', { method: 'POST', headers: { 'mcp-protocol-version': '2026-07-28' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: { ...params, _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' } } }) });
+    const discovery = await rpc('server/discover');
+    assert.ok(discovery.result.supportedVersions.includes('2026-07-28'));
+    const modern = await rpc('tools/list');
+    const legacy = await f.request('/mcp', { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) });
+    const names = modern.result.tools.map(tool => tool.name);
+    assert.equal(modern.result.resultType, 'complete');
+    assert.deepEqual(names, legacy.result.tools.map(tool => tool.name));
+    assert.ok(['website_check_review_bundle', 'website_check_page_text', 'website_check_record_findings'].every(name => names.includes(name)));
+  } finally { f.restore(); }
+});

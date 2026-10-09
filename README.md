@@ -4,13 +4,13 @@ Privédashboard voor openbare Shopify- en WooCommerce/WordPress-webshops. De eer
 
 ## Online dashboard
 
-De Site bewaart instellingen en geschiedenis in haar R2-opslag. Voeg websites toe in het dashboard en kies één of twee controles per dag. Een scan leest de homepage, verzend/FAQ-links en XML-sitemaps, en controleert maximaal 30 pagina's per run. Bij grotere sites schuift hij bij de volgende run verder door de sitemap.
+De Site bewaart instellingen en geschiedenis in haar R2-opslag. Voeg websites toe in het dashboard en kies één of twee controles per dag. Een scan leest de homepage, interne links en XML-sitemaps, en controleert maximaal 30 pagina's per run. Bij grotere sites schuift hij bij de volgende run verder door de sitemap.
 
-Per pagina worden HTTP-status, laadtijd, tekst, HTML, titel, metabeschrijving, prijzen, verzendclaims en CSS/script-referenties vergeleken. Bij de nulmeting en bij iedere gewijzigde pagina bewaart de Site de volledige opgehaalde HTML en geëxtraheerde tekst als aparte momentopname in R2. Via **Momentopname** en **Bekijk verschil** zijn die versies terug te lezen. De Site heeft geen OpenAI API-sleutel en roept de OpenAI API niet aan.
+Per pagina worden HTTP-status, laadtijd, tekst, HTML, titel, metabeschrijving, prijzen, feitelijke uitspraken en CSS/script-referenties vergeleken. De automatische tegenstrijdigheidscontrole vergelijkt herhaalde labels, dezelfde formulering met verschillende getallen en bevestigde/ontkende uitspraken. Bij de nulmeting en bij iedere gewijzigde pagina bewaart de Site de volledige opgehaalde HTML en geëxtraheerde tekst als aparte momentopname in R2. Via **Momentopname** en **Bekijk verschil** zijn die versies terug te lezen. De Site heeft geen OpenAI API-sleutel en roept de OpenAI API niet aan.
 
 ## Geplande Codex-taak
 
-De gekoppelde taak draait om 08:00 en 20:00 in `Europe/Amsterdam`. Zij roept `website_check_scan_due` en daarna `website_check_status` op via de privé-Siteplugin. De Site bepaalt per website of die run nodig is. Codex meldt betekenisvolle wijzigingen, tegenstrijdige verzendclaims en fouten; zonder verandering blijft de taak stil.
+De gekoppelde taak draait om 08:00 en 20:00 in `Europe/Amsterdam`. Zij roept `website_check_scan_due` aan via de privé-Siteplugin, leest een bundel met uitspraken en tekstfragmenten, controleert mogelijke inhoudelijke tegenstrijdigheden en slaat onderbouwde bevindingen met broncitaten op. De Site bepaalt per website of die run nodig is. Codex meldt betekenisvolle wijzigingen, tegenstrijdigheden en fouten; zonder verandering blijft de taak stil.
 
 De Siteplugin moet in Codex verbonden zijn. De taak gebruikt geen API-sleutel in de broncode of prompt. Gebruik de knop **Nu controleren** in het dashboard voor een handmatige nulmeting.
 
@@ -31,4 +31,4 @@ Open `http://localhost:8000/dashboard.html`. Deze variant schrijft naar `data/st
 
 ## Grenzen
 
-De controles vinden één of twee keer per dag plaats en zijn geen continue uptimebewaking. Checkout, ingelogde pagina's en inhoud die pas na JavaScript-uitvoering verschijnt worden niet volledig gemeten. Pagina's groter dan 2 MB krijgen een foutmelding en geen onvolledige momentopname. CSS-wijzigingen op dezelfde asset-URL zijn alleen zichtbaar als de pagina-HTML mee verandert. Afbeeldingen en externe CSS-bestanden worden niet als bytes opgeslagen. Verzendclaims worden automatisch herkend; controleer gemelde tegenstrijdigheden handmatig. Het aantal bezochte pagina's staat in het dashboard, zodat beperkte dekking zichtbaar is.
+De controles vinden één of twee keer per dag plaats en zijn geen continue uptimebewaking. Checkout, ingelogde pagina's en inhoud die pas na JavaScript-uitvoering verschijnt worden niet volledig gemeten. Pagina's groter dan 2 MB krijgen een foutmelding en geen onvolledige momentopname. CSS-wijzigingen op dezelfde asset-URL zijn alleen zichtbaar als de pagina-HTML mee verandert. Afbeeldingen en externe CSS-bestanden worden niet als bytes opgeslagen. Automatisch gevonden tegenstrijdigheden zijn signalen: productverschillen, landen, varianten en tijdelijke aanbiedingen kunnen echte verklaringen zijn. Het aantal bezochte pagina's staat in het dashboard, zodat beperkte dekking zichtbaar is.

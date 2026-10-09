@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "mkdir -p dist/server dist/.openai && cp worker/index.js dist/server/index.js && cp .openai/hosting.json dist/.openai/hosting.json",
-    "check": "node --check worker/index.js"
+    "check": "node --check worker/index.js",
+    "test": "node test_worker.mjs"
   }
 }

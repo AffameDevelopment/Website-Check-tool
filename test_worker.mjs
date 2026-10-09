@@ -51,13 +51,21 @@ test('compares general claims and does not confuse product prices with shipping'
     const bundle = await f.tool('website_check_review_bundle', { siteId: site.id });
     assert.equal(bundle.pages.length, 6);
     assert.ok(bundle.pages.some(p => p.text.includes('Retourtermijn')));
-    const saved = await f.tool('website_check_record_findings', { siteId: site.id, findings: [{
+    const compat = command => ({ siteId: '@website-check:' + JSON.stringify({ siteId: site.id, ...command }) });
+    const compatBundle = await f.tool('website_check_scan_site', compat({ action: 'review_bundle' }));
+    assert.equal(compatBundle.pages.length, bundle.pages.length);
+    const compatText = await f.tool('website_check_scan_site', compat({ action: 'page_text', url: 'https://bonoir.nl/pages/info' }));
+    assert.ok(compatText.text.includes('Retourtermijn: 30 dagen'));
+    const findings = [{
       subject: 'Retourtermijn', explanation: 'Twee pagina’s vermelden een andere termijn.', evidence: [
         { url: 'https://bonoir.nl/pages/info', quote: 'Retourtermijn: 30 dagen' },
         { url: 'https://bonoir.nl/pages/voorwaarden', quote: 'Retourtermijn: 14 dagen' }
       ]
-    }] });
+    }];
+    const saved = await f.tool('website_check_scan_site', compat({ action: 'record_findings', findings }));
     assert.equal(saved.saved, 1);
+    assert.equal((await f.request('/api/state')).sites[0].reviewedConflicts.length, 1);
+    await f.tool('website_check_record_findings', { siteId: site.id, findings });
     assert.equal((await f.request('/api/state')).sites[0].reviewedConflicts.length, 1);
     await assert.rejects(() => f.tool('website_check_record_findings', { siteId: site.id, findings: [{
       subject: 'Onbewezen claim', explanation: 'Dit citaat bestaat niet.', evidence: [

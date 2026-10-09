@@ -333,11 +333,24 @@ async function handleApi(request, env, path) {
 const MCP_TOOLS = [
   { name: 'website_check_status', description: 'Lees de websites, laatste scans, recente wijzigingen en mogelijke tegenstrijdigheden.', inputSchema: { type: 'object', properties: {} } },
   { name: 'website_check_scan_due', description: 'Scan ingeschakelde websites waarvan de controle volgens hun frequentie nodig is. Sla bevindingen op.', inputSchema: { type: 'object', properties: {} } },
-  { name: 'website_check_scan_site', description: 'Scan één website nu en sla de bevindingen op.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' } }, required: ['siteId'] } },
+  { name: 'website_check_scan_site', description: 'Scan één website nu. Accepteert ook @website-check: gevolgd door JSON met action review_bundle, page_text of record_findings als compatibiliteitsroute.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' } }, required: ['siteId'] } },
   { name: 'website_check_review_bundle', description: 'Lees claims en tekstfragmenten van gecontroleerde pagina’s om inhoudelijke tegenstrijdigheden te beoordelen.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' } }, required: ['siteId'] } },
   { name: 'website_check_page_text', description: 'Lees de actuele zichtbare tekst van één gecontroleerde pagina voor broncontrole.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' }, url: { type: 'string' } }, required: ['siteId', 'url'] } },
   { name: 'website_check_record_findings', description: 'Sla inhoudelijk beoordeelde tegenstrijdigheden met geverifieerde broncitaten op.', inputSchema: { type: 'object', properties: { siteId: { type: 'string' }, findings: { type: 'array', maxItems: 20, items: { type: 'object', properties: { subject: { type: 'string' }, explanation: { type: 'string' }, evidence: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'object', properties: { url: { type: 'string' }, quote: { type: 'string' } }, required: ['url', 'quote'] } } }, required: ['subject', 'explanation', 'evidence'] } } }, required: ['siteId', 'findings'] } }
 ];
+
+const MCP_COMPAT_PREFIX = '@website-check:';
+
+async function compatToolCall(env, value) {
+  let command;
+  try { command = JSON.parse(value.slice(MCP_COMPAT_PREFIX.length)); }
+  catch { throw new Error('Ongeldige Website Check-opdracht.'); }
+  if (!command || typeof command !== 'object' || Array.isArray(command) || typeof command.siteId !== 'string') throw new Error('Ongeldige Website Check-opdracht.');
+  if (command.action === 'review_bundle') return reviewBundle(env, command.siteId);
+  if (command.action === 'page_text') return pageText(env, command.siteId, command.url);
+  if (command.action === 'record_findings') return recordFindings(env, command);
+  throw new Error('Onbekende Website Check-opdracht.');
+}
 
 async function handleMcp(request, env) {
   if (request.method !== 'POST') return json({ error: 'POST vereist.' }, 405);
@@ -364,7 +377,12 @@ async function handleMcp(request, env) {
       const state = await readState(env);
       data = state.sites.map(s => ({ id: s.id, name: s.name, url: s.url, frequency: s.frequency, lastScan: s.lastScan, status: s.lastStatus, error: s.lastError, recentEvents: s.events.slice(0, 12), conflicts: s.conflicts, reviewedConflicts: s.reviewedConflicts || [] }));
     } else if (name === 'website_check_scan_due') data = await runScans(env, { onlyDue: true });
-    else if (name === 'website_check_scan_site') data = await runScans(env, { siteId: body.params?.arguments?.siteId });
+    else if (name === 'website_check_scan_site') {
+      const siteId = body.params?.arguments?.siteId;
+      data = typeof siteId === 'string' && siteId.startsWith(MCP_COMPAT_PREFIX)
+        ? await compatToolCall(env, siteId)
+        : await runScans(env, { siteId });
+    }
     else if (name === 'website_check_review_bundle') data = await reviewBundle(env, body.params?.arguments?.siteId);
     else if (name === 'website_check_page_text') data = await pageText(env, body.params?.arguments?.siteId, body.params?.arguments?.url);
     else if (name === 'website_check_record_findings') data = await recordFindings(env, body.params?.arguments || {});

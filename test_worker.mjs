@@ -105,6 +105,9 @@ test('gives each site a stable shareable path and serves direct links', async ()
     assert.match(html, /pushState/);
     assert.match(html, /popstate/);
     assert.match(html, /Link kopiëren/);
+    assert.match(html, /Jouw websites/);
+    assert.match(html, /Alle websites/);
+    assert.match(html, /Afhandelen/);
     assert.equal((await worker.fetch(new Request('https://dashboard.test/sundy/'), f.env)).status, 200);
   } finally { f.restore(); }
 });
@@ -326,10 +329,46 @@ test('keeps scan candidates out of the portal until Codex records a review', asy
     const reviewed = await f.request('/api/state');
     assert.equal(Object.keys(reviewed.sites[0].changeReviews).length, reviews.length);
     assert.equal((await f.tool('website_check_review_changes', { siteId: 'bonoir-nl' })).pending, 0);
+    const handled = await f.request('/api/handled', { method: 'POST', body: JSON.stringify({ siteId: 'bonoir-nl', kind: 'event', id: reviews[0].id, handled: true }) });
+    assert.equal(handled.handled, true);
+    assert.ok((await f.request('/api/state')).sites[0].handled['event:' + reviews[0].id]);
     const page = await worker.fetch(new Request('https://dashboard.test/'), f.env);
     const html = await page.text();
     assert.match(html, /Beoordeelde wijzigingen en fouten/);
     assert.match(html, /changeReviews\[e\.id\]\?\.decision==='meaningful'/);
     for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(script[1]));
+  } finally { f.restore(); }
+});
+
+test('keeps alerts open until each finding or error is handled manually', async () => {
+  const f = fixture();
+  try {
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const siteId = (await f.request('/api/state')).sites[0].id;
+    const findings = [{
+      subject: 'Retourtermijn', explanation: 'De pagina’s tonen verschillende retourtermijnen.', evidence: [
+        { url: 'https://bonoir.nl/pages/info', quote: 'Retourtermijn: 30 dagen' },
+        { url: 'https://bonoir.nl/pages/voorwaarden', quote: 'Retourtermijn: 14 dagen' }
+      ]
+    }];
+    await f.tool('website_check_record_findings', { siteId, findings });
+    f.pages['https://bonoir.nl/pages/faq'] = null;
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const site = (await f.request('/api/state')).sites[0];
+    const findingId = site.reviewedConflicts[0].id;
+    const errorId = site.events.find(event => event.type === 'error' && event.url === 'https://bonoir.nl/pages/faq').id;
+    assert.ok(findingId && errorId);
+    const setHandled = (kind, id, handled) => f.request('/api/handled', { method: 'POST', body: JSON.stringify({ siteId, kind, id, handled }) });
+    assert.equal((await setHandled('finding', findingId, true)).handled, true);
+    assert.equal((await setHandled('event', errorId, true)).handled, true);
+    const staleScan = JSON.parse(f.objects.get('website-check/state-v1.json'));
+    staleScan.sites[0].handled = {};
+    f.objects.set('website-check/state-v1.json', JSON.stringify(staleScan));
+    const handled = (await f.request('/api/state')).sites[0].handled;
+    assert.ok(handled['finding:' + findingId] && handled['event:' + errorId]);
+    assert.equal((await setHandled('event', errorId, false)).handled, false);
+    const reopened = (await f.request('/api/state')).sites[0].handled;
+    assert.equal(reopened['event:' + errorId], undefined);
+    assert.ok(reopened['finding:' + findingId]);
   } finally { f.restore(); }
 });

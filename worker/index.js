@@ -17,6 +17,18 @@ const safeUrl = value => {
 };
 const sameHost = (a, b) => { try { return new URL(a).hostname.replace(/^www\./, '') === new URL(b).hostname.replace(/^www\./, ''); } catch { return false; } };
 const slug = value => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'website';
+const temperatureRange = value => {
+  const text = clean(value).toLowerCase().replace(/,/g, '.');
+  const match = text.match(/(\d+(?:\.\d+)?)\s*[–—-]\s*(\d+(?:\.\d+)?)\s*(?:°\s*c|graden\b)/)
+    || text.match(/tussen\s+(?:de\s+)?(\d+(?:\.\d+)?)\s+en\s+(?:de\s+)?(\d+(?:\.\d+)?)\s*(?:°\s*c|graden\b)/);
+  return match ? [Number(match[1]), Number(match[2])] : null;
+};
+const compatibleTemperatureAdvice = finding => {
+  if (!/bewaar|temperatuur/i.test(`${finding.kind || ''} ${finding.explanation || ''}`)) return false;
+  const ranges = (finding.values || []).map(value => temperatureRange(value.pages?.[0]?.phrase || value.value));
+  return ranges.length >= 2 && ranges.every(range => range && range[0] <= range[1])
+    && Math.max(...ranges.map(range => range[0])) <= Math.min(...ranges.map(range => range[1]));
+};
 const readState = async env => {
   if (!env.BUCKET) throw new Error('Opslag is niet beschikbaar.');
   const saved = await env.BUCKET.get(KEY);
@@ -33,6 +45,13 @@ const readState = async env => {
     state.version = 2;
     await env.BUCKET.put(KEY, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });
   }
+  let corrected = false;
+  for (const site of state.sites || []) for (const field of ['conflicts', 'reviewedConflicts']) {
+    const items = site[field] || [];
+    const valid = items.filter(item => !compatibleTemperatureAdvice(item));
+    if (valid.length !== items.length) { site[field] = valid; corrected = true; }
+  }
+  if (corrected) await env.BUCKET.put(KEY, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });
   return state;
 };
 const writeState = async (env, state) => { state.updatedAt = new Date().toISOString(); await env.BUCKET.put(KEY, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } }); };
@@ -208,7 +227,7 @@ async function scanSite(site, env) {
     if (!values.has(fact.value)) values.set(fact.value, []);
     if (values.get(fact.value).length < 8) values.get(fact.value).push({ url: fact.url, phrase: fact.phrase });
   }
-  site.conflicts = [...grouped].filter(([, group]) => group.values.size > 1).slice(0, 100).map(([, group]) => ({ kind: group.subject, source: group.source, values: [...group.values].map(([value, pages]) => ({ value, pages })) }));
+  site.conflicts = [...grouped].filter(([, group]) => group.values.size > 1).slice(0, 100).map(([, group]) => ({ kind: group.subject, source: group.source, values: [...group.values].map(([value, pages]) => ({ value, pages })) })).filter(item => !compatibleTemperatureAdvice(item));
   const conflictSignature = JSON.stringify(site.conflicts.map(c => [c.kind, c.values.map(v => v.value)]));
   if (site.lastConflictSignature && site.lastConflictSignature !== conflictSignature && site.conflicts.length) events.push({ at: now, type: 'conflict', url: base, summary: `${site.conflicts.length} mogelijke tegenstrijdigheid(en)` });
   site.lastConflictSignature = conflictSignature;
@@ -293,7 +312,9 @@ async function recordFindings(env, { siteId, findings }) {
       if (!snapshot || !snapshot.text.toLocaleLowerCase('nl-NL').includes(quote.toLocaleLowerCase('nl-NL'))) throw new Error('Broncitaat staat niet in de actuele momentopname.');
       values.push({ value: quote, pages: [{ url, phrase: quote }] });
     }
-    accepted.push({ kind, explanation, source: 'codex', reviewedAt: new Date().toISOString(), values });
+    const reviewed = { kind, explanation, source: 'codex', reviewedAt: new Date().toISOString(), values };
+    if (compatibleTemperatureAdvice(reviewed)) throw new Error('Deze temperatuurbereiken overlappen en bewijzen geen tegenstrijdigheid.');
+    accepted.push(reviewed);
   }
   const existing = site.reviewedConflicts || [];
   for (const finding of accepted) {

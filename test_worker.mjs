@@ -88,6 +88,32 @@ test('removes legacy shipping conflicts during state migration', async () => {
   } finally { f.restore(); }
 });
 
+test('removes overlapping temperature advice and rejects it as a reviewed conflict', async () => {
+  const f = fixture();
+  try {
+    const first = 'https://bonoir.nl/products/fruitsmaken-bonbons-5-stuks';
+    const second = 'https://bonoir.nl/products/stroopwafel';
+    const quotes = ['Bewaren op een droge, donkere plek (14–20°C).', 'Onze bonbons bewaar je het best op een koele en droge plek, tussen de 15 en 18 graden.'];
+    const finding = {
+      kind: 'Aanbevolen bewaartemperatuur voor bonbons',
+      explanation: 'De temperatuur verschilt.',
+      source: 'codex',
+      values: quotes.map((quote, index) => ({ value: quote, pages: [{ url: index ? second : first, phrase: quote }] }))
+    };
+    f.objects.set('snapshot-1', JSON.stringify({ text: quotes[0] }));
+    f.objects.set('snapshot-2', JSON.stringify({ text: quotes[1] }));
+    f.objects.set('website-check/state-v1.json', JSON.stringify({ version: 2, sites: [{ id: 'bonoir-nl', url: 'https://bonoir.nl/', pages: { [first]: { snapshotKey: 'snapshot-1' }, [second]: { snapshotKey: 'snapshot-2' } }, events: [], conflicts: [finding], reviewedConflicts: [finding] }] }));
+    const state = await f.request('/api/state');
+    assert.deepEqual(state.sites[0].conflicts, []);
+    assert.deepEqual(state.sites[0].reviewedConflicts, []);
+    const persisted = JSON.parse(f.objects.get('website-check/state-v1.json'));
+    assert.deepEqual(persisted.sites[0].reviewedConflicts, []);
+    const response = await worker.fetch(new Request('https://dashboard.test/mcp', { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'website_check_record_findings', arguments: { siteId: 'bonoir-nl', findings: [{ subject: finding.kind, explanation: finding.explanation, evidence: [{ url: first, quote: quotes[0] }, { url: second, quote: quotes[1] }] }] } } }) }), f.env);
+    assert.equal(response.status, 500);
+    assert.match((await response.json()).error, /temperatuurbereiken overlappen/);
+  } finally { f.restore(); }
+});
+
 test('discovers all review tools with both MCP protocol versions', async () => {
   const f = fixture();
   try {

@@ -40,6 +40,11 @@ test('compares general claims and does not confuse product prices with shipping'
     await f.request('/api/scan', { method: 'POST', body: '{}' });
     const state = await f.request('/api/state');
     const site = state.sites[0];
+    const dashboard = await worker.fetch(new Request('https://dashboard.test/'), f.env);
+    const html = await dashboard.text();
+    assert.match(html, /Beoordeelde tegenstrijdigheden/);
+    assert.match(html, /const conflicts=s\.reviewedConflicts\|\|\[\]/);
+    assert.doesNotMatch(html, /Automatisch gevonden · controleer de context/);
     assert.equal(site.scanned, 6);
     assert.ok(site.conflicts.some(c => c.kind === 'garantie op alle producten'));
     assert.ok(site.conflicts.some(c => c.kind === 'retourtermijn'));
@@ -102,10 +107,11 @@ test('removes overlapping temperature advice and rejects it as a reviewed confli
     };
     f.objects.set('snapshot-1', JSON.stringify({ text: quotes[0] }));
     f.objects.set('snapshot-2', JSON.stringify({ text: quotes[1] }));
-    f.objects.set('website-check/state-v1.json', JSON.stringify({ version: 2, sites: [{ id: 'bonoir-nl', url: 'https://bonoir.nl/', pages: { [first]: { snapshotKey: 'snapshot-1' }, [second]: { snapshotKey: 'snapshot-2' } }, events: [], conflicts: [finding], reviewedConflicts: [finding] }] }));
+    f.objects.set('website-check/state-v1.json', JSON.stringify({ version: 2, sites: [{ id: 'bonoir-nl', url: 'https://bonoir.nl/', pages: { [first]: { snapshotKey: 'snapshot-1' }, [second]: { snapshotKey: 'snapshot-2' } }, events: [{ type: 'conflict', summary: 'Ruwe patroonmatch' }], conflicts: [finding], reviewedConflicts: [finding] }] }));
     const state = await f.request('/api/state');
     assert.deepEqual(state.sites[0].conflicts, []);
     assert.deepEqual(state.sites[0].reviewedConflicts, []);
+    assert.deepEqual(state.sites[0].events, []);
     const persisted = JSON.parse(f.objects.get('website-check/state-v1.json'));
     assert.deepEqual(persisted.sites[0].reviewedConflicts, []);
     const response = await worker.fetch(new Request('https://dashboard.test/mcp', { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'website_check_record_findings', arguments: { siteId: 'bonoir-nl', findings: [{ subject: finding.kind, explanation: finding.explanation, evidence: [{ url: first, quote: quotes[0] }, { url: second, quote: quotes[1] }] }] } } }) }), f.env);

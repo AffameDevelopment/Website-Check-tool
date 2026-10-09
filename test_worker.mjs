@@ -85,6 +85,30 @@ test('compares general claims and does not confuse product prices with shipping'
   } finally { f.restore(); }
 });
 
+test('gives each site a stable shareable path and serves direct links', async () => {
+  const f = fixture();
+  try {
+    assert.equal((await f.request('/api/state')).sites[0].routeSlug, 'bonoir');
+    const add = async (name, url, id) => f.request('/api/sites', { method: 'POST', body: JSON.stringify({ name, url, id }) });
+    await add('Sundy', 'https://sundy.nl/');
+    const sundy = (await f.request('/api/state')).sites.find(site => site.name === 'Sundy');
+    assert.equal(sundy.routeSlug, 'sundy');
+    await add('Andere Sundy', 'https://sundy.com/');
+    const other = (await f.request('/api/state')).sites.find(site => site.name === 'Andere Sundy');
+    assert.equal(other.routeSlug, 'sundy-2');
+    await add('Sundy', 'https://nieuwe-sundy.nl/', sundy.id);
+    assert.equal((await f.request('/api/state')).sites.find(site => site.id === sundy.id).routeSlug, 'sundy');
+    const direct = await worker.fetch(new Request('https://dashboard.test/sundy'), f.env);
+    assert.equal(direct.status, 200);
+    const html = await direct.text();
+    assert.match(html, /syncSelectionFromPath/);
+    assert.match(html, /pushState/);
+    assert.match(html, /popstate/);
+    assert.match(html, /Link kopiëren/);
+    assert.equal((await worker.fetch(new Request('https://dashboard.test/sundy/'), f.env)).status, 200);
+  } finally { f.restore(); }
+});
+
 test('removes legacy shipping conflicts during state migration', async () => {
   const f = fixture();
   try {

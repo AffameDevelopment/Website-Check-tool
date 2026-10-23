@@ -112,6 +112,39 @@ test('gives each site a stable shareable path and serves direct links', async ()
   } finally { f.restore(); }
 });
 
+test('stores domain rules separately and exposes only the matching rules to Codex', async () => {
+  const f = fixture();
+  try {
+    await f.request('/api/sites', { method: 'POST', body: JSON.stringify({ name: 'Sundy', url: 'https://sundy.nl/' }) });
+    let sites = (await f.request('/api/state')).sites;
+    const bonoir = sites.find(site => site.name === 'Bonoir');
+    const sundy = sites.find(site => site.name === 'Sundy');
+    const change = (siteId, action, id, text) => f.request('/api/rules', { method: 'POST', body: JSON.stringify({ siteId, action, id, text }) });
+    const added = await change(bonoir.id, 'add', null, 'Controleer altijd de verzendbelofte.');
+    await change(sundy.id, 'add', null, 'Meld wijzigingen in de retourtermijn.');
+    await change(bonoir.id, 'update', added.rules[0].id, 'Controleer de bezorgtermijn op alle pagina’s.');
+    const stale = JSON.parse(f.objects.get('website-check/state-v1.json'));
+    stale.sites.find(site => site.id === bonoir.id).rules = [];
+    f.objects.set('website-check/state-v1.json', JSON.stringify(stale));
+    sites = (await f.request('/api/state')).sites;
+    assert.deepEqual(sites.find(site => site.id === bonoir.id).rules.map(rule => rule.text), ['Controleer de bezorgtermijn op alle pagina’s.']);
+    assert.deepEqual(sites.find(site => site.id === sundy.id).rules.map(rule => rule.text), ['Meld wijzigingen in de retourtermijn.']);
+    const status = await f.tool('website_check_status');
+    const bundle = await f.tool('website_check_review_bundle', { siteId: bonoir.id });
+    const changes = await f.tool('website_check_review_changes', { siteId: bonoir.id });
+    assert.deepEqual(bundle.rules, changes.rules);
+    assert.deepEqual(status.find(site => site.id === bonoir.id).rules, bundle.rules);
+    assert.ok(!JSON.stringify(bundle).includes('retourtermijn'));
+    await change(bonoir.id, 'delete', added.rules[0].id);
+    assert.deepEqual((await f.request('/api/state')).sites.find(site => site.id === bonoir.id).rules, []);
+    const dashboard = await worker.fetch(new Request('https://dashboard.test/'), f.env);
+    const html = await dashboard.text();
+    assert.match(html, /Regels voor/);
+    assert.match(html, /Regel toevoegen/);
+    for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(script[1]));
+  } finally { f.restore(); }
+});
+
 test('removes legacy shipping conflicts during state migration', async () => {
   const f = fixture();
   try {

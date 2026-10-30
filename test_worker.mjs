@@ -215,14 +215,16 @@ test('checks an anonymous Shopify cart and checkout without placing an order', a
       if (url.endsWith('/products/test.js')) return Response.json({ variants: [{ id: 123, available: true }] });
       if (url.endsWith('/cart/add.js')) return new Response('{"id":123}', { headers: { 'set-cookie': 'cart=token123; Path=/; HttpOnly', 'content-type': 'application/json' } });
       if (url.endsWith('/cart.js')) return Response.json({ items: [{ variant_id: 123 }] });
-      if (url.endsWith('/checkout')) return new Response('<form id="checkout">Adres</form>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/checkout')) return new Response('', { status: 302, headers: { location: '/checkouts/cn/test' } });
+      if (url.endsWith('/checkouts/cn/test')) return new Response('<form id="checkout">Adres</form>', { headers: { 'content-type': 'text/html' } });
       return new Response('Not found', { status: 404 });
     };
     const scan = await f.request('/api/scan', { method: 'POST', body: '{}' });
     assert.equal(scan.results[0].checkout.status, 'ok');
-    assert.equal(scan.results[0].checkout.checkoutUrl, 'https://bonoir.nl/checkout');
+    assert.equal(scan.results[0].checkout.checkoutUrl, 'https://bonoir.nl/checkouts/cn/test');
     assert.ok(calls.find(call => call.url.endsWith('/cart.js')).cookie.includes('cart=token123'));
     assert.ok(calls.find(call => call.url.endsWith('/checkout')).cookie.includes('cart=token123'));
+    assert.ok(calls.find(call => call.url.endsWith('/checkouts/cn/test')).cookie.includes('cart=token123'));
     assert.ok(!calls.some(call => /payment|order|complete/i.test(call.url)));
   } finally { f.restore(); }
 });

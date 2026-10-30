@@ -369,14 +369,22 @@ async function checkCheckout(base, urls, get, pace, cachedPages) {
     checkoutUrl = linkedRoute(cart.body, base, /\/(?:checkout|afrekenen)\/?$/i);
     if (!checkoutUrl) return { status: 'inconclusive', platform: 'WooCommerce', productUrl, cartUrl, reason: 'Geen checkoutlink gevonden in de winkelmand.' };
   } else return { status: 'inconclusive', productUrl, reason: 'Winkelplatform niet herkend.' };
-  const checkout = await checkoutRequest(checkoutUrl, pace, jar);
+  let checkout = await checkoutRequest(checkoutUrl, pace, jar);
+  for (let redirects = 0; redirects < 2 && checkout.status >= 300 && checkout.status < 400 && checkout.location; redirects++) {
+    let target;
+    try { target = new URL(checkout.location, checkoutUrl); } catch { break; }
+    if (!sameHost(target.href, base) || !/\/(?:checkout|checkouts|afrekenen)(?:\/|$)/i.test(target.pathname)) break;
+    checkoutUrl = target.href;
+    checkout = await checkoutRequest(checkoutUrl, pace, jar);
+  }
   if (checkout.status === 429) return { status: 'limited', url: checkoutUrl, foundAt: [cartUrl], retryAfter: checkout.retryAfter };
   if (checkout.status >= 400) return { status: 'issue', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, url: checkoutUrl, foundAt: [cartUrl], error: `Checkout niet bereikbaar: HTTP ${checkout.status}` };
   if (checkout.status >= 300 && checkout.status < 400) {
     const target = checkout.location ? new URL(checkout.location, checkoutUrl) : null;
     return { status: 'inconclusive', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, reason: target ? `Winkelmand werkt; checkout verwijst door naar ${target.href}` : 'Checkout verwijst door zonder doel-URL.' };
   }
-  if (!/checkout|afrekenen|bestelling|payment|billing/i.test(checkout.body)) return { status: 'inconclusive', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, reason: 'Checkoutpagina geeft HTTP 200 maar formulier is niet bevestigd.' };
+  if (/cart is empty|your cart is empty|winkelwagen is leeg/i.test(checkout.body)) return { status: 'issue', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, url: checkoutUrl, foundAt: [cartUrl], error: 'Winkelmand is leeg op de checkoutpagina.' };
+  if (!/<form\b[^>]*(?:checkout|afrekenen)|Shopify\.Checkout|data-step=["']contact_information/i.test(checkout.body)) return { status: 'inconclusive', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, reason: 'Checkoutpagina geeft HTTP 200 maar formulier is niet bevestigd.' };
   return { status: 'ok', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, checkedAt: new Date().toISOString() };
 }
 

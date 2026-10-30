@@ -4,7 +4,7 @@ import worker from './worker/index.js';
 
 function fixture() {
   const objects = new Map();
-  const env = { BUCKET: {
+  const env = { SCAN_INTERVAL_MS: 0, BUCKET: {
     get: async key => objects.has(key) ? { text: async () => objects.get(key) } : null,
     put: async (key, value) => { objects.set(key, value); }
   } };
@@ -142,6 +142,112 @@ test('stores domain rules separately and exposes only the matching rules to Code
     assert.match(html, /Regels voor/);
     assert.match(html, /Regel toevoegen/);
     for (const script of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(script[1]));
+  } finally { f.restore(); }
+});
+
+test('stops after HTTP 429 and reports the URL with its actual discovery source', async () => {
+  const f = fixture();
+  const calls = [];
+  try {
+    globalThis.fetch = async url => {
+      url = String(url);
+      calls.push(url);
+      if (url.endsWith('/sitemap.xml')) return new Response('<urlset><url><loc>https://bonoir.nl/pages/info</loc></url><url><loc>https://bonoir.nl/pages/faq</loc></url></urlset>', { headers: { 'content-type': 'application/xml' } });
+      if (url === 'https://bonoir.nl/') return new Response('<a href="/pages/info">Info</a>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/pages/info')) return new Response('Rate limited', { status: 429, headers: { 'retry-after': '120' } });
+      return new Response('OK', { headers: { 'content-type': 'text/html' } });
+    };
+    const scan = await f.request('/api/scan', { method: 'POST', body: '{}' });
+    assert.equal(scan.results[0].status, 'limited');
+    const issue = scan.results[0].issues[0];
+    assert.equal(issue.type, 'rate_limit');
+    assert.equal(issue.url, 'https://bonoir.nl/pages/info');
+    assert.deepEqual(issue.foundAt, ['https://bonoir.nl/', 'https://bonoir.nl/sitemap.xml']);
+    assert.ok(!calls.includes('https://bonoir.nl/pages/faq'));
+    const site = (await f.request('/api/state')).sites[0];
+    assert.equal(site.pages[issue.url], undefined);
+    assert.equal(site.lastStatus, 'limited');
+    assert.equal(site.scanned, 2);
+    const status = await f.tool('website_check_status');
+    assert.deepEqual(status[0].issues[0], issue);
+    const count = calls.length;
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    assert.equal(calls.length, count);
+  } finally { f.restore(); }
+});
+
+test('reports a real broken URL and its sitemap source', async () => {
+  const f = fixture();
+  try {
+    f.pages['https://bonoir.nl/pages/missing'] = null;
+    await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const site = (await f.request('/api/state')).sites[0];
+    const issue = site.lastScanIssues.find(item => item.url === 'https://bonoir.nl/pages/missing');
+    assert.equal(issue.status, 404);
+    assert.deepEqual(issue.foundAt, ['https://bonoir.nl/sitemap.xml']);
+    assert.equal(site.events.find(event => event.url === issue.url).foundAt[0], 'https://bonoir.nl/sitemap.xml');
+  } finally { f.restore(); }
+});
+
+test('removes legacy HTTP 429 page errors from the broken-link count', async () => {
+  const f = fixture();
+  try {
+    f.objects.set('website-check/state-v1.json', JSON.stringify({ version: 2, sites: [{ id: 'bonoir-nl', url: 'https://bonoir.nl/', pages: { 'https://bonoir.nl/pages/info': { url: 'https://bonoir.nl/pages/info', status: 429, error: 'HTTP 429' } }, events: [{ at: '2026-10-23T06:00:00Z', type: 'error', url: 'https://bonoir.nl/pages/info', summary: 'HTTP 429' }], conflicts: [], reviewedConflicts: [], lastStatus: 'warning', lastError: '1 pagina niet bereikbaar' }] }));
+    const site = (await f.request('/api/state')).sites[0];
+    assert.equal(site.pages['https://bonoir.nl/pages/info'].status, null);
+    assert.equal(site.pages['https://bonoir.nl/pages/info'].error, null);
+    assert.equal(site.lastStatus, 'limited');
+    assert.deepEqual(site.events, []);
+    assert.match(site.lastError, /geen bevestigde kapotte pagina/);
+  } finally { f.restore(); }
+});
+
+test('checks an anonymous Shopify cart and checkout without placing an order', async () => {
+  const f = fixture();
+  const calls = [];
+  try {
+    globalThis.fetch = async (input, options = {}) => {
+      const url = String(input);
+      calls.push({ url, method: options.method || 'GET', cookie: new Headers(options.headers).get('cookie') });
+      if (url.endsWith('/sitemap.xml')) return new Response('<urlset><url><loc>https://bonoir.nl/products/test</loc></url></urlset>', { headers: { 'content-type': 'application/xml' } });
+      if (url === 'https://bonoir.nl/') return new Response('<a href="/products/test">Test</a>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/products/test')) return new Response('<html><body><script>window.Shopify = {};</script>Testproduct</body></html>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/products/test.js')) return Response.json({ variants: [{ id: 123, available: true }] });
+      if (url.endsWith('/cart/add.js')) return new Response('{"id":123}', { headers: { 'set-cookie': 'cart=token123; Path=/; HttpOnly', 'content-type': 'application/json' } });
+      if (url.endsWith('/cart.js')) return Response.json({ items: [{ variant_id: 123 }] });
+      if (url.endsWith('/checkout')) return new Response('<form id="checkout">Adres</form>', { headers: { 'content-type': 'text/html' } });
+      return new Response('Not found', { status: 404 });
+    };
+    const scan = await f.request('/api/scan', { method: 'POST', body: '{}' });
+    assert.equal(scan.results[0].checkout.status, 'ok');
+    assert.equal(scan.results[0].checkout.checkoutUrl, 'https://bonoir.nl/checkout');
+    assert.ok(calls.find(call => call.url.endsWith('/cart.js')).cookie.includes('cart=token123'));
+    assert.ok(calls.find(call => call.url.endsWith('/checkout')).cookie.includes('cart=token123'));
+    assert.ok(!calls.some(call => /payment|order|complete/i.test(call.url)));
+  } finally { f.restore(); }
+});
+
+test('checks a WooCommerce cart and follows its actual checkout link', async () => {
+  const f = fixture();
+  const calls = [];
+  try {
+    globalThis.fetch = async (input, options = {}) => {
+      const url = String(input);
+      calls.push({ url, method: options.method || 'GET', cookie: new Headers(options.headers).get('cookie') });
+      if (url.endsWith('/sitemap.xml')) return new Response('<urlset><url><loc>https://bonoir.nl/product/test</loc></url></urlset>', { headers: { 'content-type': 'application/xml' } });
+      if (url === 'https://bonoir.nl/') return new Response('<a href="/product/test">Test</a>', { headers: { 'content-type': 'text/html' } });
+      if (url.startsWith('https://bonoir.nl/product/test?add-to-cart=') && options.method === 'POST') return new Response('', { status: 302, headers: { location: '/cart/', 'set-cookie': 'wp_woocommerce_session=abc123; Path=/; HttpOnly' } });
+      if (url.endsWith('/product/test')) return new Response('<html><body class="woocommerce"><form class="cart"><button value="45" name="add-to-cart">Toevoegen</button></form></body></html>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/cart/')) return new Response('<form class="woocommerce-cart-form"><div class="cart_item">Test</div></form><a href="/checkout/">Afrekenen</a>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/checkout/')) return new Response('<form class="woocommerce-checkout">Adres</form>', { headers: { 'content-type': 'text/html' } });
+      return new Response('Not found', { status: 404 });
+    };
+    const scan = await f.request('/api/scan', { method: 'POST', body: '{}' });
+    assert.equal(scan.results[0].checkout.status, 'ok');
+    assert.equal(scan.results[0].checkout.platform, 'WooCommerce');
+    assert.equal(scan.results[0].checkout.checkoutUrl, 'https://bonoir.nl/checkout/');
+    assert.ok(calls.find(call => call.url.endsWith('/cart/')).cookie.includes('wp_woocommerce_session=abc123'));
+    assert.ok(calls.find(call => call.url.endsWith('/checkout/')).cookie.includes('wp_woocommerce_session=abc123'));
   } finally { f.restore(); }
 });
 

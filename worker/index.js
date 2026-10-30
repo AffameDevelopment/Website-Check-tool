@@ -323,7 +323,7 @@ function linkedRoute(html, base, pattern) {
 }
 
 async function checkCheckout(base, urls, get, pace, cachedPages) {
-  const productUrl = urls.find(url => /\/(?:products?|product)\/[^/?#]+/i.test(new URL(url).pathname));
+  const productUrl = urls.find(url => /\/(?:products?|product|p)\/[^/?#]+/i.test(new URL(url).pathname));
   if (!productUrl) return { status: 'inconclusive', reason: 'Geen productpagina gevonden om winkelmand en checkout te testen.' };
   const product = cachedPages.get(productUrl) || await get(productUrl);
   if (product.status === 429) return { status: 'limited', url: productUrl, foundAt: [base], retryAfter: product.retryAfter };
@@ -361,12 +361,15 @@ async function checkCheckout(base, urls, get, pace, cachedPages) {
     const added = await checkoutRequest(addUrl.href, pace, jar, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ 'add-to-cart': id, quantity: '1' }) });
     if (added.status === 429) return { status: 'limited', url: addUrl.href, foundAt: [productUrl], retryAfter: added.retryAfter };
     if (added.status >= 400) return { status: 'issue', platform: 'WooCommerce', productUrl, url: addUrl.href, foundAt: [productUrl], error: `Toevoegen aan winkelmand mislukt: HTTP ${added.status}` };
-    cartUrl = linkedRoute(product.text, base, /\/(?:cart|winkelwagen)\/?$/i) || new URL('/cart/', base).href;
+    cartUrl = linkedRoute(product.text, base, /\/(?:cart|winkelwagen)\/?$/i)
+      || urls.find(url => /\/(?:cart|winkelwagen)\/?$/i.test(new URL(url).pathname))
+      || new URL('/cart/', base).href;
     cart = await checkoutRequest(cartUrl, pace, jar);
     if (cart.status === 429) return { status: 'limited', url: cartUrl, foundAt: [productUrl], retryAfter: cart.retryAfter };
     if (cart.status >= 400) return { status: 'inconclusive', platform: 'WooCommerce', productUrl, cartUrl, reason: `Winkelmandroute niet bevestigd: HTTP ${cart.status}` };
     if (!/woocommerce-cart-form|cart_item|wc-block-cart/i.test(cart.body)) return { status: 'inconclusive', platform: 'WooCommerce', productUrl, cartUrl, reason: 'Toegevoegd product niet bevestigd in winkelmand.' };
-    checkoutUrl = linkedRoute(cart.body, base, /\/(?:checkout|afrekenen)\/?$/i);
+    checkoutUrl = linkedRoute(cart.body, base, /\/(?:checkout|afrekenen)\/?$/i)
+      || urls.find(url => /\/(?:checkout|afrekenen)\/?$/i.test(new URL(url).pathname));
     if (!checkoutUrl) return { status: 'inconclusive', platform: 'WooCommerce', productUrl, cartUrl, reason: 'Geen checkoutlink gevonden in de winkelmand.' };
   } else return { status: 'inconclusive', productUrl, reason: 'Winkelplatform niet herkend.' };
   let checkout = await checkoutRequest(checkoutUrl, pace, jar);

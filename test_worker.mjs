@@ -236,20 +236,20 @@ test('checks a WooCommerce cart and follows its actual checkout link', async () 
     globalThis.fetch = async (input, options = {}) => {
       const url = String(input);
       calls.push({ url, method: options.method || 'GET', cookie: new Headers(options.headers).get('cookie') });
-      if (url.endsWith('/sitemap.xml')) return new Response('<urlset><url><loc>https://bonoir.nl/product/test</loc></url></urlset>', { headers: { 'content-type': 'application/xml' } });
-      if (url === 'https://bonoir.nl/') return new Response('<a href="/product/test">Test</a>', { headers: { 'content-type': 'text/html' } });
-      if (url.startsWith('https://bonoir.nl/product/test?add-to-cart=') && options.method === 'POST') return new Response('', { status: 302, headers: { location: '/cart/', 'set-cookie': 'wp_woocommerce_session=abc123; Path=/; HttpOnly' } });
-      if (url.endsWith('/product/test')) return new Response('<html><body class="woocommerce"><form class="cart"><button value="45" name="add-to-cart">Toevoegen</button></form></body></html>', { headers: { 'content-type': 'text/html' } });
-      if (url.endsWith('/cart/')) return new Response('<form class="woocommerce-cart-form"><div class="cart_item">Test</div></form><a href="/checkout/">Afrekenen</a>', { headers: { 'content-type': 'text/html' } });
-      if (url.endsWith('/checkout/')) return new Response('<form class="woocommerce-checkout">Adres</form>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/sitemap.xml')) return new Response('<urlset><url><loc>https://bonoir.nl/p/test/</loc></url><url><loc>https://bonoir.nl/winkelwagen/</loc></url></urlset>', { headers: { 'content-type': 'application/xml' } });
+      if (url === 'https://bonoir.nl/') return new Response('<a href="/p/test/">Test</a>', { headers: { 'content-type': 'text/html' } });
+      if (url.startsWith('https://bonoir.nl/p/test/?add-to-cart=') && options.method === 'POST') return new Response('', { status: 302, headers: { location: '/winkelwagen/', 'set-cookie': 'wp_woocommerce_session=abc123; Path=/; HttpOnly' } });
+      if (url.endsWith('/p/test/')) return new Response('<html><body class="woocommerce"><form class="cart"><button value="45" name="add-to-cart">Toevoegen</button></form></body></html>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/winkelwagen/')) return new Response('<form class="woocommerce-cart-form"><div class="cart_item">Test</div></form><a href="/afrekenen/">Afrekenen</a>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/afrekenen/')) return new Response('<form class="woocommerce-checkout">Adres</form>', { headers: { 'content-type': 'text/html' } });
       return new Response('Not found', { status: 404 });
     };
     const scan = await f.request('/api/scan', { method: 'POST', body: '{}' });
     assert.equal(scan.results[0].checkout.status, 'ok');
     assert.equal(scan.results[0].checkout.platform, 'WooCommerce');
-    assert.equal(scan.results[0].checkout.checkoutUrl, 'https://bonoir.nl/checkout/');
-    assert.ok(calls.find(call => call.url.endsWith('/cart/')).cookie.includes('wp_woocommerce_session=abc123'));
-    assert.ok(calls.find(call => call.url.endsWith('/checkout/')).cookie.includes('wp_woocommerce_session=abc123'));
+    assert.equal(scan.results[0].checkout.checkoutUrl, 'https://bonoir.nl/afrekenen/');
+    assert.ok(calls.find(call => call.url.endsWith('/winkelwagen/') && call.cookie).cookie.includes('wp_woocommerce_session=abc123'));
+    assert.ok(calls.find(call => call.url.endsWith('/afrekenen/')).cookie.includes('wp_woocommerce_session=abc123'));
   } finally { f.restore(); }
 });
 

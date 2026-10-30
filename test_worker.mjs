@@ -202,6 +202,16 @@ test('removes legacy HTTP 429 page errors from the broken-link count', async () 
   } finally { f.restore(); }
 });
 
+test('removes a Shopify checkout session URL from already stored results', async () => {
+  const f = fixture();
+  try {
+    f.objects.set('website-check/state-v1.json', JSON.stringify({ version: 2, sites: [{ id: 'bonoir-nl', url: 'https://bonoir.nl/', pages: {}, events: [], conflicts: [], reviewedConflicts: [], checkoutCheck: { status: 'ok', platform: 'Shopify', checkoutUrl: 'https://bonoir.nl/checkouts/cn/secret/nl-nl?_r=token' } }] }));
+    const site = (await f.request('/api/state')).sites[0];
+    assert.equal(site.checkoutCheck.checkoutUrl, 'https://bonoir.nl/checkout');
+    assert.ok(!f.objects.get('website-check/state-v1.json').includes('/checkouts/cn/secret'));
+  } finally { f.restore(); }
+});
+
 test('checks an anonymous Shopify cart and checkout without placing an order', async () => {
   const f = fixture();
   const calls = [];
@@ -221,10 +231,11 @@ test('checks an anonymous Shopify cart and checkout without placing an order', a
     };
     const scan = await f.request('/api/scan', { method: 'POST', body: '{}' });
     assert.equal(scan.results[0].checkout.status, 'ok');
-    assert.equal(scan.results[0].checkout.checkoutUrl, 'https://bonoir.nl/checkouts/cn/test');
+    assert.equal(scan.results[0].checkout.checkoutUrl, 'https://bonoir.nl/checkout');
     assert.ok(calls.find(call => call.url.endsWith('/cart.js')).cookie.includes('cart=token123'));
     assert.ok(calls.find(call => call.url.endsWith('/checkout')).cookie.includes('cart=token123'));
     assert.ok(calls.find(call => call.url.endsWith('/checkouts/cn/test')).cookie.includes('cart=token123'));
+    assert.ok(!JSON.stringify((await f.request('/api/state')).sites[0].checkoutCheck).includes('/checkouts/cn/test'));
     assert.ok(!calls.some(call => /payment|order|complete/i.test(call.url)));
   } finally { f.restore(); }
 });

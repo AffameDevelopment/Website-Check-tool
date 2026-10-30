@@ -117,6 +117,14 @@ const readState = async env => {
       site.lastScanIssues = (site.lastScanIssues || []).filter(issue => issue.status !== 429);
       corrected = true;
     }
+    if (site.checkoutCheck?.checkoutUrl) {
+      const safe = reportableCheckoutUrl(site.checkoutCheck.checkoutUrl, site.url);
+      if (safe !== site.checkoutCheck.checkoutUrl) { site.checkoutCheck.checkoutUrl = safe; corrected = true; }
+    }
+    if (site.checkoutCheck?.url && site.checkoutCheck.platform === 'Shopify') {
+      const safe = reportableCheckoutUrl(site.checkoutCheck.url, site.url);
+      if (safe !== site.checkoutCheck.url) { site.checkoutCheck.url = safe; corrected = true; }
+    }
     if (!site.changeReviews) { site.changeReviews = {}; corrected = true; }
     for (const event of site.events || []) if (!event.id) { event.id = await eventId(site.id, event); corrected = true; }
   }
@@ -322,6 +330,16 @@ function linkedRoute(html, base, pattern) {
   return null;
 }
 
+function reportableCheckoutUrl(url, base) {
+  try {
+    const parsed = new URL(url, base);
+    if (/^\/checkouts\//i.test(parsed.pathname)) return new URL('/checkout', base).href;
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.href;
+  } catch { return new URL('/checkout', base).href; }
+}
+
 async function checkCheckout(base, urls, get, pace, cachedPages) {
   const productUrl = urls.find(url => /\/(?:products?|product|p)\/[^/?#]+/i.test(new URL(url).pathname));
   if (!productUrl) return { status: 'inconclusive', reason: 'Geen productpagina gevonden om winkelmand en checkout te testen.' };
@@ -382,15 +400,16 @@ async function checkCheckout(base, urls, get, pace, cachedPages) {
     checkoutUrl = target.href;
     checkout = await checkoutRequest(checkoutUrl, pace, jar);
   }
-  if (checkout.status === 429) return { status: 'limited', url: checkoutUrl, foundAt: [cartUrl], retryAfter: checkout.retryAfter };
-  if (checkout.status >= 400) return { status: 'issue', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, url: checkoutUrl, foundAt: [cartUrl], error: `Checkout niet bereikbaar: HTTP ${checkout.status}` };
+  const reportedCheckoutUrl = reportableCheckoutUrl(checkoutUrl, base);
+  if (checkout.status === 429) return { status: 'limited', url: reportedCheckoutUrl, foundAt: [cartUrl], retryAfter: checkout.retryAfter };
+  if (checkout.status >= 400) return { status: 'issue', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl: reportedCheckoutUrl, url: reportedCheckoutUrl, foundAt: [cartUrl], error: `Checkout niet bereikbaar: HTTP ${checkout.status}` };
   if (checkout.status >= 300 && checkout.status < 400) {
     const target = checkout.location ? new URL(checkout.location, checkoutUrl) : null;
-    return { status: 'inconclusive', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, reason: target ? `Winkelmand werkt; checkout verwijst door naar ${target.href}` : 'Checkout verwijst door zonder doel-URL.' };
+    return { status: 'inconclusive', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl: reportedCheckoutUrl, reason: target ? `Winkelmand werkt; checkout verwijst door naar ${target.hostname}` : 'Checkout verwijst door zonder doel-URL.' };
   }
-  if (/cart is empty|your cart is empty|winkelwagen is leeg/i.test(checkout.body)) return { status: 'issue', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, url: checkoutUrl, foundAt: [cartUrl], error: 'Winkelmand is leeg op de checkoutpagina.' };
-  if (!/<form\b[^>]*(?:checkout|afrekenen)|Shopify\.Checkout|data-step=["']contact_information/i.test(checkout.body)) return { status: 'inconclusive', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, reason: 'Checkoutpagina geeft HTTP 200 maar formulier is niet bevestigd.' };
-  return { status: 'ok', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl, checkedAt: new Date().toISOString() };
+  if (/cart is empty|your cart is empty|winkelwagen is leeg/i.test(checkout.body)) return { status: 'issue', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl: reportedCheckoutUrl, url: reportedCheckoutUrl, foundAt: [cartUrl], error: 'Winkelmand is leeg op de checkoutpagina.' };
+  if (!/<form\b[^>]*(?:checkout|afrekenen)|Shopify\.Checkout|data-step=["']contact_information/i.test(checkout.body)) return { status: 'inconclusive', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl: reportedCheckoutUrl, reason: 'Checkoutpagina geeft HTTP 200 maar formulier is niet bevestigd.' };
+  return { status: 'ok', platform: shopify ? 'Shopify' : 'WooCommerce', productUrl, cartUrl, checkoutUrl: reportedCheckoutUrl, checkedAt: new Date().toISOString() };
 }
 
 async function scanSite(site, env) {

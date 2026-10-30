@@ -253,6 +253,27 @@ test('checks a WooCommerce cart and follows its actual checkout link', async () 
   } finally { f.restore(); }
 });
 
+test('reports a confirmed WooCommerce cart URL returning 404 after adding a product', async () => {
+  const f = fixture();
+  try {
+    globalThis.fetch = async (input, options = {}) => {
+      const url = String(input);
+      if (url.endsWith('/sitemap.xml')) return new Response('<urlset><url><loc>https://bonoir.nl/p/test/</loc></url><url><loc>https://bonoir.nl/winkelwagen/</loc></url></urlset>', { headers: { 'content-type': 'application/xml' } });
+      if (url === 'https://bonoir.nl/') return new Response('<a href="/p/test/">Test</a><a href="/winkelwagen/">Winkelwagen</a>', { headers: { 'content-type': 'text/html' } });
+      if (url.startsWith('https://bonoir.nl/p/test/?add-to-cart=') && options.method === 'POST') return new Response('', { status: 302, headers: { location: '/winkelwagen/', 'set-cookie': 'wp_woocommerce_session=abc123; Path=/' } });
+      if (url.endsWith('/p/test/')) return new Response('<body class="woocommerce"><button name="add-to-cart" value="45">Toevoegen</button></body>', { headers: { 'content-type': 'text/html' } });
+      if (url.endsWith('/winkelwagen/')) return new Response('Not found', { status: 404 });
+      return new Response('Not found', { status: 404 });
+    };
+    const scan = await f.request('/api/scan', { method: 'POST', body: '{}' });
+    const result = scan.results[0];
+    assert.equal(result.checkout.status, 'issue');
+    assert.equal(result.checkout.url, 'https://bonoir.nl/winkelwagen/');
+    assert.equal(result.checkout.foundAt[0], 'https://bonoir.nl/p/test/');
+    assert.ok(result.issues.some(issue => issue.type === 'checkout' && issue.url === result.checkout.url));
+  } finally { f.restore(); }
+});
+
 test('removes legacy shipping conflicts during state migration', async () => {
   const f = fixture();
   try {

@@ -361,12 +361,14 @@ async function checkCheckout(base, urls, get, pace, cachedPages) {
     const added = await checkoutRequest(addUrl.href, pace, jar, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ 'add-to-cart': id, quantity: '1' }) });
     if (added.status === 429) return { status: 'limited', url: addUrl.href, foundAt: [productUrl], retryAfter: added.retryAfter };
     if (added.status >= 400) return { status: 'issue', platform: 'WooCommerce', productUrl, url: addUrl.href, foundAt: [productUrl], error: `Toevoegen aan winkelmand mislukt: HTTP ${added.status}` };
-    cartUrl = linkedRoute(product.text, base, /\/(?:cart|winkelwagen)\/?$/i)
-      || urls.find(url => /\/(?:cart|winkelwagen)\/?$/i.test(new URL(url).pathname))
-      || new URL('/cart/', base).href;
+    const linkedCart = linkedRoute(product.text, base, /\/(?:cart|winkelwagen)\/?$/i)
+      || urls.find(url => /\/(?:cart|winkelwagen)\/?$/i.test(new URL(url).pathname));
+    cartUrl = linkedCart || new URL('/cart/', base).href;
     cart = await checkoutRequest(cartUrl, pace, jar);
     if (cart.status === 429) return { status: 'limited', url: cartUrl, foundAt: [productUrl], retryAfter: cart.retryAfter };
-    if (cart.status >= 400) return { status: 'inconclusive', platform: 'WooCommerce', productUrl, cartUrl, reason: `Winkelmandroute niet bevestigd: HTTP ${cart.status}` };
+    if (cart.status >= 400) return linkedCart
+      ? { status: 'issue', platform: 'WooCommerce', productUrl, cartUrl, url: cartUrl, foundAt: [productUrl], error: `Winkelmand niet bereikbaar na toevoegen product: HTTP ${cart.status}` }
+      : { status: 'inconclusive', platform: 'WooCommerce', productUrl, cartUrl, reason: `Winkelmandroute niet bevestigd: HTTP ${cart.status}` };
     if (!/woocommerce-cart-form|cart_item|wc-block-cart/i.test(cart.body)) return { status: 'inconclusive', platform: 'WooCommerce', productUrl, cartUrl, reason: 'Toegevoegd product niet bevestigd in winkelmand.' };
     checkoutUrl = linkedRoute(cart.body, base, /\/(?:checkout|afrekenen)\/?$/i)
       || urls.find(url => /\/(?:checkout|afrekenen)\/?$/i.test(new URL(url).pathname));
